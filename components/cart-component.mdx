@@ -1,0 +1,370 @@
+---
+title: "Cart Component"
+description: "Shopping cart management with reactive state and local caching"
+---
+
+The Cart Component manages shopping cart operations including adding items, updating quantities, and observing cart state. It uses local caching for persistence and reactive flows for real-time updates.
+
+## Overview
+
+The cart component provides:
+- **Cart state management** with reactive updates
+- **Local persistence** using JSON cache
+- **Quantity management** for cart items
+- **Subtotal calculation** based on cart items
+- **User-scoped carts** supporting multiple users
+
+<Note>
+The cart component depends on the `user-component` to get the current user ID and the `money-component` for currency handling.
+</Note>
+
+## Domain Models
+
+The cart component defines two core domain models representing the shopping cart structure.
+
+### Cart
+
+Represents a user's shopping cart with business logic for calculations.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.domain.model
+
+import com.denisbrandi.androidrealca.money.domain.model.Money
+
+data class Cart(val cartItems: List<CartItem>) {
+    fun getSubtotal(): Money? {
+        return if (cartItems.isNotEmpty()) {
+            val currency = cartItems[0].money.currencySymbol
+            var subtotal = 0.0
+            cartItems.forEach {
+                subtotal += it.money.amount * it.quantity
+            }
+            Money(subtotal, currency)
+        } else {
+            null
+        }
+    }
+
+    fun getNumberOfItems(): Int {
+        return cartItems.sumOf { it.quantity }
+    }
+}
+```
+
+<Accordion title="Cart Business Logic">
+  **getSubtotal()**: Calculates the total price of all items in the cart by multiplying each item's price by its quantity. Returns `null` if cart is empty.
+
+  **getNumberOfItems()**: Returns the total count of items, summing up all quantities (e.g., 2 apples + 3 oranges = 5 items).
+</Accordion>
+
+### CartItem
+
+Represents a single product in the shopping cart.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.domain.model
+
+import com.denisbrandi.androidrealca.money.domain.model.Money
+
+data class CartItem(
+    val id: String,
+    val name: String,
+    val money: Money,
+    val imageUrl: String,
+    val quantity: Int
+)
+```
+
+<ParamField path="id" type="String">
+  Unique identifier for the product
+</ParamField>
+
+<ParamField path="name" type="String">
+  Display name of the product
+</ParamField>
+
+<ParamField path="money" type="Money">
+  Price information including amount and currency symbol
+</ParamField>
+
+<ParamField path="imageUrl" type="String">
+  URL to the product image
+</ParamField>
+
+<ParamField path="quantity" type="Int">
+  Number of units in the cart (0 means remove from cart)
+</ParamField>
+
+## Repository Interface
+
+The repository defines the contract for cart data operations.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.domain.repository
+
+import com.denisbrandi.androidrealca.cart.domain.model.*
+import kotlinx.coroutines.flow.Flow
+
+internal interface CartRepository {
+    fun updateCartItem(userId: String, cartItem: CartItem)
+    fun observeCart(userId: String): Flow<Cart>
+    fun getCart(userId: String): Cart
+}
+```
+
+<Info>
+**Reactive Updates**: The `observeCart()` method returns a `Flow<Cart>` that emits new cart state whenever items are added, removed, or updated.
+</Info>
+
+## Use Cases
+
+The cart component provides three main use cases for cart operations.
+
+### AddCartItemUseCase
+
+Adds a product to the cart, handling duplicate items intelligently.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.domain.usecase
+
+import com.denisbrandi.androidrealca.cart.domain.model.CartItem
+import com.denisbrandi.androidrealca.cart.domain.repository.CartRepository
+import com.denisbrandi.androidrealca.user.domain.usecase.GetUser
+
+internal class AddCartItemUseCase(
+    private val getUser: GetUser,
+    private val cartRepository: CartRepository,
+    private val updateCartItem: UpdateCartItem
+) : AddCartItem {
+    override fun invoke(cartItem: CartItem) {
+        val cartItemInCart = cartRepository.getCart(getUser().id).cartItems.find {
+            it.id == cartItem.id
+        }
+        if (cartItemInCart != null) {
+            updateCartItem(cartItemInCart.copy(quantity = cartItemInCart.quantity + cartItem.quantity))
+        } else {
+            updateCartItem(cartItem)
+        }
+    }
+}
+```
+
+<Steps>
+  <Step title="Get current user">
+    Retrieves the user ID to ensure cart operations are user-specific
+  </Step>
+  <Step title="Check for existing item">
+    Searches the cart for an item with the same ID
+  </Step>
+  <Step title="Update or add">
+    If item exists, increments the quantity. Otherwise, adds as new item
+  </Step>
+</Steps>
+
+### UpdateCartItemUseCase
+
+Updates a cart item (typically for quantity changes).
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.domain.usecase
+
+import com.denisbrandi.androidrealca.cart.domain.model.CartItem
+import com.denisbrandi.androidrealca.cart.domain.repository.CartRepository
+import com.denisbrandi.androidrealca.user.domain.usecase.GetUser
+
+internal class UpdateCartItemUseCase(
+    private val getUser: GetUser,
+    private val cartRepository: CartRepository
+) : UpdateCartItem {
+    override fun invoke(cartItem: CartItem) {
+        cartRepository.updateCartItem(getUser().id, cartItem)
+    }
+}
+```
+
+<Tip>
+Set `quantity = 0` to remove an item from the cart. The repository implementation handles this automatically.
+</Tip>
+
+### ObserveUserCartUseCase
+
+Observes cart changes in real-time.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.domain.usecase
+
+import com.denisbrandi.androidrealca.cart.domain.model.Cart
+import com.denisbrandi.androidrealca.cart.domain.repository.CartRepository
+import com.denisbrandi.androidrealca.user.domain.usecase.GetUser
+import kotlinx.coroutines.flow.Flow
+
+internal class ObserveUserCartUseCase(
+    private val getUser: GetUser,
+    private val cartRepository: CartRepository
+) : ObserveUserCart {
+    override fun invoke(): Flow<Cart> {
+        return cartRepository.observeCart(getUser().id)
+    }
+}
+```
+
+### Use Case Interfaces
+
+All use cases implement functional interfaces:
+
+```kotlin
+fun interface UpdateCartItem {
+    operator fun invoke(cartItem: CartItem)
+}
+
+fun interface ObserveUserCart {
+    operator fun invoke(): Flow<Cart>
+}
+
+fun interface AddCartItem {
+    operator fun invoke(cartItem: CartItem)
+}
+```
+
+## Data Layer
+
+The data layer implements cart persistence using local JSON caching.
+
+### RealCartRepository
+
+Implements the `CartRepository` interface with caching support.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.data.repository
+
+import com.denisbrandi.androidrealca.cache.*
+import com.denisbrandi.androidrealca.cart.data.model.*
+import com.denisbrandi.androidrealca.cart.domain.model.*
+import com.denisbrandi.androidrealca.cart.domain.repository.CartRepository
+import com.denisbrandi.androidrealca.money.domain.model.Money
+import kotlinx.coroutines.flow.*
+
+internal class RealCartRepository(
+    private val cacheProvider: CacheProvider
+) : CartRepository {
+
+    private val flowCachedObject: FlowCachedObject<JsonCartCacheDto> by lazy {
+        cacheProvider.getFlowCachedObject(
+            fileName = "cart-cache",
+            serializer = JsonCartCacheDto.serializer(),
+            defaultValue = JsonCartCacheDto(emptyMap())
+        )
+    }
+
+    override fun updateCartItem(userId: String, cartItem: CartItem) {
+        val updatedCache = getUpdatedCacheForUser(userId) { userCart ->
+            val cartItemInCache = userCart.find { it.id == cartItem.id }
+            val cartItemDto = mapToDto(cartItem)
+            if (cartItemInCache != null) {
+                if (cartItem.quantity == 0) {
+                    userCart.remove(cartItemInCache)
+                } else {
+                    val index = userCart.indexOf(cartItemInCache)
+                    userCart[index] = cartItemDto
+                }
+            } else {
+                userCart.add(cartItemDto)
+            }
+        }
+        flowCachedObject.put(updatedCache)
+    }
+
+    override fun observeCart(userId: String): Flow<Cart> {
+        return flowCachedObject.observe().map { cachedDto ->
+            mapToCart(userId, cachedDto)
+        }
+    }
+
+    override fun getCart(userId: String): Cart {
+        return mapToCart(userId, flowCachedObject.get())
+    }
+}
+```
+
+<Accordion title="Key Implementation Details">
+  **FlowCachedObject**: Provides reactive caching that emits updates when data changes
+
+  **User-scoped storage**: Stores carts in a map keyed by user ID, supporting multiple users
+
+  **Automatic removal**: Setting quantity to 0 removes the item from cache
+
+  **DTO mapping**: Converts between domain models and cache DTOs
+</Accordion>
+
+### Cache DTOs
+
+Data transfer objects for JSON serialization.
+
+```kotlin
+package com.denisbrandi.androidrealca.cart.data.model
+
+import kotlinx.serialization.*
+
+@Serializable
+data class JsonCartCacheDto(
+    @SerialName("usersWishlist") val usersCart: Map<String, List<JsonCartItemCacheDto>>
+)
+
+@Serializable
+data class JsonCartItemCacheDto(
+    @SerialName("id") val id: String,
+    @SerialName("name") val name: String,
+    @SerialName("price") val price: Double,
+    @SerialName("currency") val currency: String,
+    @SerialName("imageUrl") val imageUrl: String,
+    @SerialName("quantity") val quantity: Int
+)
+```
+
+## Usage Example
+
+Here's how the cart component is used in the Cart UI layer:
+
+```kotlin
+// CartViewModel observes cart state
+internal interface CartViewModel : StateViewModel<CartScreenState> {
+    fun updateCartItemQuantity(cartItem: CartItem)
+}
+
+internal data class CartScreenState(val cart: Cart)
+
+// In ViewModel implementation:
+class RealCartViewModel(
+    private val observeUserCart: ObserveUserCart,
+    private val updateCartItem: UpdateCartItem
+) : CartViewModel {
+    
+    init {
+        // Observe cart changes
+        observeUserCart()
+            .onEach { cart ->
+                updateState { CartScreenState(cart) }
+            }
+            .launchIn(viewModelScope)
+    }
+    
+    override fun updateCartItemQuantity(cartItem: CartItem) {
+        updateCartItem(cartItem)
+    }
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Product Component" icon="box" href="/components/product-component">
+    Learn about product models used in cart items
+  </Card>
+  <Card title="Money Component" icon="dollar-sign" href="/components/money-component">
+    Understand currency handling in the cart
+  </Card>
+  <Card title="User Component" icon="user" href="/components/user-component">
+    See how user context is managed
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand the overall architecture
+  </Card>
+</CardGroup>

@@ -1,0 +1,351 @@
+---
+title: "Product Component"
+description: "Product catalog with network fetching and Answer type for error handling"
+---
+
+The Product Component handles product catalog operations, fetching products from a remote API and providing them to the application. It demonstrates network integration and the Answer pattern for elegant error handling.
+
+## Overview
+
+The product component provides:
+- **Remote product fetching** via HTTP API
+- **Answer pattern** for type-safe error handling
+- **Product model** with monetary values
+- **Access token management** for API requests
+- **Clean separation** between domain and data layers
+
+<Info>
+The product component uses the `foundations` module's `Answer` type for functional error handling and the `money-component` for price representation.
+</Info>
+
+## Domain Model
+
+### Product
+
+Represents a product in the catalog.
+
+```kotlin
+package com.denisbrandi.androidrealca.product.domain.model
+
+import com.denisbrandi.androidrealca.money.domain.model.Money
+
+data class Product(
+    val id: String,
+    val name: String,
+    val money: Money,
+    val imageUrl: String
+)
+```
+
+<ParamField path="id" type="String">
+  Unique identifier for the product
+</ParamField>
+
+<ParamField path="name" type="String">
+  Product display name
+</ParamField>
+
+<ParamField path="money" type="Money">
+  Price information with amount and currency symbol
+</ParamField>
+
+<ParamField path="imageUrl" type="String">
+  URL to product image for display
+</ParamField>
+
+## Repository Interface
+
+The repository defines the contract for product data operations.
+
+```kotlin
+package com.denisbrandi.androidrealca.product.domain.repository
+
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.product.domain.model.Product
+
+internal interface ProductRepository {
+    suspend fun getProducts(): Answer<List<Product>, Unit>
+}
+```
+
+<Note>
+The repository returns `Answer<List<Product>, Unit>` where:
+- **Success**: Contains the list of products
+- **Error**: Contains `Unit` (no specific error details)
+</Note>
+
+## Use Case
+
+### GetProducts
+
+A functional interface for retrieving products.
+
+```kotlin
+package com.denisbrandi.androidrealca.product.domain.usecase
+
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.product.domain.model.Product
+
+fun interface GetProducts {
+    suspend operator fun invoke(): Answer<List<Product>, Unit>
+}
+```
+
+<Tip>
+Using a `fun interface` allows for SAM (Single Abstract Method) conversion, enabling clean lambda implementations for testing.
+</Tip>
+
+## Data Layer
+
+The data layer implements network fetching using Ktor HTTP client.
+
+### RealProductRepository
+
+Implements the `ProductRepository` interface with HTTP networking.
+
+```kotlin
+package com.denisbrandi.androidrealca.product.data.repository
+
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.httpclient.AccessTokenProvider
+import com.denisbrandi.androidrealca.money.domain.model.Money
+import com.denisbrandi.androidrealca.product.data.model.JsonProductResponseDTO
+import com.denisbrandi.androidrealca.product.domain.model.Product
+import com.denisbrandi.androidrealca.product.domain.repository.ProductRepository
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.*
+import io.ktor.client.statement.HttpResponse
+import io.ktor.http.*
+
+internal class RealProductRepository(
+    private val httpClient: HttpClient
+) : ProductRepository {
+    override suspend fun getProducts(): Answer<List<Product>, Unit> {
+        return try {
+            val response =
+                httpClient.get("https://api.json-generator.com/templates/Vc6TVI8VwZNT/data") {
+                    headers {
+                        append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                        val accessTokenHeader = AccessTokenProvider.getAccessTokenHeader()
+                        append(accessTokenHeader.first, accessTokenHeader.second)
+                    }
+                }
+            if (response.status.isSuccess()) {
+                handleSuccessfulProductsResponse(response)
+            } else {
+                Answer.Error(Unit)
+            }
+        } catch (t: Throwable) {
+            Answer.Error(Unit)
+        }
+    }
+
+    private suspend fun handleSuccessfulProductsResponse(httpResponse: HttpResponse): Answer<List<Product>, Unit> {
+        val responseBody = httpResponse.body<List<JsonProductResponseDTO>>()
+        return Answer.Success(mapProducts(responseBody))
+    }
+
+    private fun mapProducts(jsonProducts: List<JsonProductResponseDTO>): List<Product> {
+        return jsonProducts.map { jsonProduct ->
+            Product(
+                jsonProduct.id.toString(),
+                jsonProduct.name,
+                Money(jsonProduct.price, jsonProduct.currency),
+                jsonProduct.imageUrl
+            )
+        }
+    }
+}
+```
+
+<Steps>
+  <Step title="Make HTTP request">
+    Uses Ktor client to GET products from the JSON generator API
+  </Step>
+  <Step title="Add authorization">
+    Includes access token header for API authentication
+  </Step>
+  <Step title="Handle response">
+    Checks HTTP status and deserializes JSON response
+  </Step>
+  <Step title="Map to domain">
+    Converts DTOs to domain models, wrapping in Answer type
+  </Step>
+  <Step title="Handle errors">
+    Catches network exceptions and HTTP errors, returning Answer.Error
+  </Step>
+</Steps>
+
+<Warning>
+All errors (network failures, HTTP errors) are currently mapped to `Answer.Error(Unit)`. In production, you might want to provide more specific error types.
+</Warning>
+
+### Network DTO
+
+Data transfer object for API response deserialization.
+
+```kotlin
+package com.denisbrandi.androidrealca.product.data.model
+
+import kotlinx.serialization.*
+
+@Serializable
+data class JsonProductResponseDTO(
+    @SerialName("id") val id: Int,
+    @SerialName("name") val name: String,
+    @SerialName("price") val price: Double,
+    @SerialName("currency") val currency: String,
+    @SerialName("imageUrl") val imageUrl: String
+)
+```
+
+<Note>
+The DTO uses `Int` for the ID (as received from API), but it's converted to `String` in the domain model for consistency with other components.
+</Note>
+
+## Answer Type Pattern
+
+The product component uses the `Answer` type from the foundations module for type-safe error handling.
+
+```kotlin
+package com.denisbrandi.androidrealca.foundations
+
+sealed class Answer<out T, out E> {
+    data class Success<out T>(
+        val data: T,
+    ) : Answer<T, Nothing>()
+
+    data class Error<out E>(
+        val reason: E,
+    ) : Answer<Nothing, E>()
+
+    fun <C> fold(
+        success: (T) -> C,
+        error: (E) -> C,
+    ): C =
+        when (this) {
+            is Success -> success(data)
+            is Error -> error(reason)
+        }
+}
+```
+
+<Accordion title="Why Answer over Result or exceptions?">
+  **Type-safe errors**: The error type `E` is part of the type signature, making error handling explicit
+
+  **Functional composition**: The `fold` method enables functional programming patterns
+
+  **No exceptions**: Errors are values, not exceptions, leading to more predictable code
+
+  **Clear contracts**: API consumers know exactly what errors to expect
+</Accordion>
+
+## Usage Example
+
+Here's how the product component is used in the Product List Page (PLP) UI:
+
+```kotlin
+// In PLPViewModel
+internal interface PLPViewModel : StateViewModel<PLPScreenState> {
+    fun loadProducts()
+    fun addProductToWishlist(product: Product)
+    fun addProductToCart(product: Product)
+}
+
+internal data class PLPScreenState(
+    val fullName: String,
+    val wishlistIds: List<String> = emptyList(),
+    val displayState: DisplayState? = null
+)
+
+internal sealed interface DisplayState {
+    data object Loading : DisplayState
+    data object Error : DisplayState
+    data class Content(val products: List<Product>) : DisplayState
+}
+
+// In ViewModel implementation:
+class RealPLPViewModel(
+    private val getProducts: GetProducts,
+    private val addToWishlist: AddToWishlist,
+    private val addCartItem: AddCartItem
+) : PLPViewModel {
+    
+    override fun loadProducts() {
+        viewModelScope.launch {
+            updateState { currentState ->
+                currentState.copy(displayState = DisplayState.Loading)
+            }
+            
+            val result = getProducts()
+            
+            result.fold(
+                success = { products ->
+                    updateState { currentState ->
+                        currentState.copy(displayState = DisplayState.Content(products))
+                    }
+                },
+                error = {
+                    updateState { currentState ->
+                        currentState.copy(displayState = DisplayState.Error)
+                    }
+                }
+            )
+        }
+    }
+    
+    override fun addProductToCart(product: Product) {
+        val cartItem = CartItem(
+            id = product.id,
+            name = product.name,
+            money = product.money,
+            imageUrl = product.imageUrl,
+            quantity = 1
+        )
+        addCartItem(cartItem)
+    }
+}
+```
+
+<Tip>
+The `fold()` method on `Answer` provides a clean way to handle both success and error cases in a single expression.
+</Tip>
+
+## Testing
+
+The functional interface design makes testing straightforward:
+
+```kotlin
+// Test implementation
+val testGetProducts = GetProducts {
+    Answer.Success(listOf(
+        Product(
+            id = "1",
+            name = "Test Product",
+            money = Money(9.99, "$"),
+            imageUrl = "https://example.com/image.jpg"
+        )
+    ))
+}
+
+// Or for error case
+val errorGetProducts = GetProducts {
+    Answer.Error(Unit)
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Cart Component" icon="shopping-cart" href="/components/cart-component">
+    See how products are added to the cart
+  </Card>
+  <Card title="Wishlist Component" icon="heart" href="/components/wishlist-component">
+    Learn about wishlist functionality
+  </Card>
+  <Card title="Money Component" icon="dollar-sign" href="/components/money-component">
+    Understand price representation
+  </Card>
+  <Card title="Foundations" icon="building" href="/libraries/foundations">
+    Learn more about the Answer type
+  </Card>
+</CardGroup>

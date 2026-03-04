@@ -1,0 +1,514 @@
+---
+title: Library Modules
+description: Reusable, framework-agnostic library modules that provide core functionality
+icon: cube
+---
+
+Library modules are small, focused, reusable components that provide fundamental functionality across the application. These modules are framework-agnostic and can be used in any layer of the architecture.
+
+## Module Overview
+
+Real Clean Architecture includes several library modules:
+
+<CardGroup cols={2}>
+  <Card title="cache" icon="database" href="#cache">
+    Local data persistence abstraction
+  </Card>
+  <Card title="foundations" icon="cubes" href="#foundations">
+    Core domain types like Answer
+  </Card>
+  <Card title="httpclient" icon="globe" href="#httpclient">
+    HTTP client configuration
+  </Card>
+  <Card title="viewmodel" icon="eye" href="#viewmodel">
+    ViewModel base interfaces
+  </Card>
+  <Card title="designsystem" icon="palette" href="#designsystem">
+    Reusable UI components
+  </Card>
+  <Card title="cache-test" icon="vial" href="#testing-modules">
+    Test utilities for cache
+  </Card>
+  <Card title="flow-test-observer" icon="vial" href="#testing-modules">
+    Flow testing utilities
+  </Card>
+  <Card title="coroutines-test-dispatcher" icon="vial" href="#testing-modules">
+    Coroutines testing support
+  </Card>
+</CardGroup>
+
+---
+
+## cache
+
+The `cache` module provides abstractions for local data persistence using the [Multiplatform Settings](https://github.com/russhwolf/multiplatform-settings) library.
+
+### Module Configuration
+
+```kotlin
+plugins {
+    alias(libs.plugins.kotlin.multiplatform)
+    alias(libs.plugins.kotlin.serialization)
+}
+
+kotlin {
+    jvmToolchain(17)
+    jvm()
+    iosX64()
+    iosArm64()
+    iosSimulatorArm64()
+    sourceSets {
+        commonMain {
+            dependencies {
+                implementation(libs.multiplatform.settings)
+                implementation(libs.multiplatform.settings.serialization)
+                implementation(libs.kotlin.serialization)
+                implementation(libs.coroutines.core)
+            }
+        }
+    }
+}
+```
+
+### Core Interfaces
+
+<Steps>
+  <Step title="CachedObject - Basic Cache Interface">
+    Provides simple get/put operations for cached data.
+
+    ```kotlin
+    interface CachedObject<T : Any> {
+        fun put(value: T)
+        fun get(): T
+    }
+    ```
+  </Step>
+
+  <Step title="FlowCachedObject - Reactive Cache">
+    Extends `CachedObject` with Flow-based observation.
+
+    ```kotlin
+    interface FlowCachedObject<T : Any> : CachedObject<T> {
+        fun observe(): Flow<T>
+    }
+    ```
+  </Step>
+
+  <Step title="CacheProvider - Factory Interface">
+    Creates cached objects with serialization support.
+
+    ```kotlin
+    interface CacheProvider {
+        fun <T : Any> getCachedObject(
+            fileName: String,
+            serializer: KSerializer<T>,
+            defaultValue: T
+        ): CachedObject<T>
+
+        fun <T : Any> getFlowCachedObject(
+            fileName: String,
+            serializer: KSerializer<T>,
+            defaultValue: T
+        ): FlowCachedObject<T>
+    }
+    ```
+  </Step>
+</Steps>
+
+### Implementation
+
+The module provides `RealCachedObject` and `RealFlowCachedObject` implementations:
+
+```kotlin
+class RealCachedObject<T : Any>(
+    private val fileName: String,
+    private val settings: Settings,
+    private val serializer: KSerializer<T>,
+    private val defaultValue: T
+) : CachedObject<T> {
+    override fun put(value: T) {
+        settings.encodeValue(serializer, fileName, value)
+    }
+
+    override fun get(): T {
+        return settings.decodeValue(serializer, fileName, defaultValue)
+    }
+}
+```
+
+<Note>
+The cache module is **multiplatform** and supports JVM, iOS (x64, Arm64, Simulator Arm64), making it perfect for sharing cache logic across platforms.
+</Note>
+
+### Platform-Specific Implementation
+
+In the `app` module, Android-specific implementation uses `SharedPreferences`:
+
+```kotlin
+class AndroidCacheProvider(
+    private val applicationContext: Context
+) : CacheProvider {
+
+    private val settings by lazy {
+        val sharedPrefs = PreferenceManager.getDefaultSharedPreferences(applicationContext)
+        SharedPreferencesSettings(sharedPrefs)
+    }
+
+    override fun <T : Any> getCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): CachedObject<T> {
+        return RealCachedObject(fileName, settings, serializer, defaultValue)
+    }
+
+    override fun <T : Any> getFlowCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): FlowCachedObject<T> {
+        return RealFlowCachedObject(getCachedObject(fileName, serializer, defaultValue))
+    }
+}
+```
+
+---
+
+## foundations
+
+The `foundations` module contains fundamental domain types used across the application.
+
+### Answer Type
+
+A sealed class representing the result of an operation that can succeed or fail:
+
+```kotlin
+sealed class Answer<out T, out E> {
+    data class Success<out T>(
+        val data: T,
+    ) : Answer<T, Nothing>()
+
+    data class Error<out E>(
+        val reason: E,
+    ) : Answer<Nothing, E>()
+
+    fun <C> fold(
+        success: (T) -> C,
+        error: (E) -> C,
+    ): C =
+        when (this) {
+            is Success -> success(data)
+            is Error -> error(reason)
+        }
+}
+```
+
+<Tip>
+The `Answer` type provides a type-safe way to handle success and error cases, similar to `Result` but with custom error types. Use the `fold` function to elegantly handle both cases.
+</Tip>
+
+### Usage Example
+
+From `user-component/src/commonMain/kotlin/com/denisbrandi/androidrealca/user/domain/usecase/UserUseCases.kt:6`:
+
+```kotlin
+fun interface Login {
+    suspend operator fun invoke(loginRequest: LoginRequest): Answer<Unit, LoginError>
+}
+```
+
+---
+
+## httpclient
+
+The `httpclient` module provides a configured Ktor HTTP client for network requests.
+
+### HttpClientProvider Interface
+
+```kotlin
+interface HttpClientProvider {
+    fun getClient(): HttpClient
+}
+```
+
+### RealHttpClientProvider Implementation
+
+```kotlin
+object RealHttpClientProvider : HttpClientProvider {
+
+    private val httpClient by lazy {
+        createClient(CIO.create())
+    }
+
+    fun createClient(engine: HttpClientEngine): HttpClient {
+        return HttpClient(engine) {
+            install(ContentNegotiation) {
+                json(
+                    Json {
+                        isLenient = true
+                        ignoreUnknownKeys = true
+                    }
+                )
+            }
+            install(HttpTimeout) {
+                requestTimeoutMillis = 3000L
+            }
+        }
+    }
+
+    override fun getClient(): HttpClient {
+        return httpClient
+    }
+}
+```
+
+<Info>
+The HTTP client is configured with:
+- **ContentNegotiation** for JSON serialization/deserialization
+- **HttpTimeout** with 3-second request timeout
+- **CIO engine** for Kotlin/Native compatibility
+</Info>
+
+---
+
+## viewmodel
+
+The `viewmodel` module provides base interfaces and delegates for implementing the presentation layer.
+
+### Core Interfaces
+
+```kotlin
+interface StateViewModel<State> {
+    val state: StateFlow<State>
+}
+
+interface EventViewModel<ViewEvent> {
+    val viewEvent: Flow<ViewEvent>
+}
+```
+
+### Delegate Implementations
+
+<Accordion title="StateDelegate - State Management">
+  Manages UI state with `StateFlow`:
+
+  ```kotlin
+  class StateDelegate<State> : StateViewModel<State> {
+      private lateinit var _state: MutableStateFlow<State>
+      override val state: StateFlow<State>
+          get() = _state.asStateFlow()
+
+      fun setDefaultState(state: State) {
+          _state = MutableStateFlow(state)
+      }
+
+      fun updateState(block: (State) -> State) {
+          _state.update {
+              block(it)
+          }
+      }
+  }
+  ```
+</Accordion>
+
+<Accordion title="EventDelegate - One-Time Events">
+  Manages one-time view events with `SharedFlow`:
+
+  ```kotlin
+  class EventDelegate<ViewEvent> : EventViewModel<ViewEvent> {
+      private val _viewEvent = MutableSharedFlow<ViewEvent>()
+      override val viewEvent: Flow<ViewEvent> = _viewEvent.asSharedFlow()
+
+      fun sendEvent(scope: CoroutineScope, newEvent: ViewEvent) {
+          scope.launch {
+              _viewEvent.emit(newEvent)
+          }
+      }
+  }
+  ```
+</Accordion>
+
+### Usage in ViewModels
+
+From `cart-ui/src/main/java/com/denisbrandi/androidrealca/cart/presentation/viewmodel/CartViewModel.kt:6`:
+
+```kotlin
+internal interface CartViewModel : StateViewModel<CartScreenState> {
+    fun updateCartItemQuantity(cartItem: CartItem)
+}
+
+internal data class CartScreenState(val cart: Cart)
+```
+
+<Warning>
+Always use `StateDelegate` for UI state that should survive configuration changes, and `EventDelegate` for one-time events like navigation or showing toasts.
+</Warning>
+
+---
+
+## designsystem
+
+The `designsystem` module contains reusable UI components, theme definitions, and design tokens.
+
+### Components
+
+The module includes:
+
+- **Buttons.kt** - Button components with consistent styling
+- **Colors.kt** - Color palette definitions
+- **Dimens.kt** - Spacing and dimension values
+- **EmptyContents.kt** - Empty state views
+- **ErrorDialogs.kt** - Error dialog components
+- **ErrorViews.kt** - Error state views
+- **Labels.kt** - Text label components
+- **Loadings.kt** - Loading indicators
+- **ModalEvent.kt** - Modal event handling
+- **Theme.kt** - Material theme configuration
+- **TopBar.kt** - App bar components
+- **Typography.kt** - Text styles
+
+<Info>
+The design system provides a centralized location for all UI components, ensuring consistency across the entire application.
+</Info>
+
+---
+
+## Testing Modules
+
+Three specialized modules support testing across the application.
+
+### cache-test
+
+Provides test implementations for cache abstractions.
+
+#### TestCacheProvider
+
+```kotlin
+class TestCacheProvider(
+    private val expectedFileName: String,
+    private val expectedDefaultValue: Any
+) : CacheProvider {
+
+    lateinit var providedCachedObject: InMemoryCachedObject<*>
+
+    override fun <T : Any> getCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): CachedObject<T> {
+        return if (expectedFileName == fileName && expectedDefaultValue == defaultValue) {
+            InMemoryCachedObject(defaultValue).also {
+                providedCachedObject = it
+            }
+        } else {
+            throw IllegalStateException("getCachedObject not stubbed")
+        }
+    }
+
+    override fun <T : Any> getFlowCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): FlowCachedObject<T> {
+        return RealFlowCachedObject(getCachedObject(fileName, serializer, defaultValue))
+    }
+}
+```
+
+### flow-test-observer
+
+Provides utilities for testing Kotlin Flows.
+
+```kotlin
+class FlowTestObserver<T : Any>(
+    private val flow: Flow<T>,
+    coroutineScope: CoroutineScope
+) {
+    private val emittedValues = mutableListOf<T>()
+    private val job: Job = flow.onEach {
+        emittedValues.add(it)
+    }.launchIn(coroutineScope)
+
+    fun getValues() = emittedValues
+
+    fun stopObserving() {
+        job.cancel()
+    }
+
+    fun getFlow() = flow
+}
+
+fun <T : Any> Flow<T>.test(
+    coroutineScope: CoroutineScope = CoroutineScope(UnconfinedTestDispatcher())
+) = FlowTestObserver(this, coroutineScope)
+```
+
+**Usage:**
+
+```kotlin
+val observer = myFlow.test()
+// Trigger emissions
+assertEquals(expectedValues, observer.getValues())
+```
+
+### coroutines-test-dispatcher
+
+Provides JUnit rule for testing coroutines on Android.
+
+```kotlin
+class MainCoroutineRule : TestWatcher() {
+
+    private val testDispatcher = UnconfinedTestDispatcher()
+
+    override fun starting(description: Description?) {
+        Dispatchers.setMain(testDispatcher)
+    }
+
+    override fun finished(description: Description?) {
+        Dispatchers.resetMain()
+    }
+}
+```
+
+**Usage:**
+
+```kotlin
+class MyViewModelTest {
+    @get:Rule
+    val mainCoroutineRule = MainCoroutineRule()
+
+    @Test
+    fun `test coroutine execution`() {
+        // Coroutines will run on test dispatcher
+    }
+}
+```
+
+<Tip>
+Use these testing modules together to write comprehensive tests for your components:
+- `cache-test` for repository tests
+- `flow-test-observer` for use case tests
+- `coroutines-test-dispatcher` for ViewModel tests
+</Tip>
+
+---
+
+## Best Practices
+
+<Steps>
+  <Step title="Keep Modules Small and Focused">
+    Each library module should have a single responsibility and minimal dependencies.
+  </Step>
+
+  <Step title="Favor Multiplatform Modules">
+    When possible, create multiplatform modules to share code across Android and iOS.
+  </Step>
+
+  <Step title="Provide Test Utilities">
+    Create corresponding test modules (like `cache-test`) to make testing easier for consumers.
+  </Step>
+
+  <Step title="Use Clear Abstractions">
+    Define interfaces (`CacheProvider`, `HttpClientProvider`) that can be easily mocked or replaced.
+  </Step>
+</Steps>

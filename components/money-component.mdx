@@ -1,0 +1,411 @@
+---
+title: "Money Component"
+description: "Monetary value representation with amount and currency"
+---
+
+The Money Component provides a domain model for representing monetary values with their currency. It's a foundational component used across the application for price representation.
+
+## Overview
+
+The money component provides:
+- **Type-safe money representation** avoiding primitive obsession
+- **Currency-aware values** with amount and symbol
+- **Shared domain model** used by multiple components
+- **Simple, immutable data structure**
+
+<Info>
+The Money component is used by Product, Cart, and Wishlist components for consistent price representation.
+</Info>
+
+## Domain Model
+
+### Money
+
+A simple data class representing a monetary amount with its currency.
+
+```kotlin
+package com.denisbrandi.androidrealca.money.domain.model
+
+data class Money(val amount: Double, val currencySymbol: String)
+```
+
+<ParamField path="amount" type="Double">
+  The numeric value of the money (e.g., 19.99)
+</ParamField>
+
+<ParamField path="currencySymbol" type="String">
+  The currency symbol or code (e.g., "$", "€", "USD")
+</ParamField>
+
+## Why a Money Type?
+
+The Money component demonstrates the **Value Object** pattern and avoids **primitive obsession**.
+
+<Accordion title="Primitive Obsession Anti-Pattern">
+  **Without Money type:**
+  ```kotlin
+  data class Product(
+      val id: String,
+      val name: String,
+      val price: Double,        // What currency?
+      val currency: String,     // Easy to mix up parameters
+      val imageUrl: String
+  )
+  
+  // Easy to make mistakes:
+  Product("1", "Item", "USD", 19.99, "url")  // Wrong parameter order!
+  ```
+
+  **With Money type:**
+  ```kotlin
+  data class Product(
+      val id: String,
+      val name: String,
+      val money: Money,         // Clear intent
+      val imageUrl: String
+  )
+  
+  // Type-safe construction:
+  Product("1", "Item", Money(19.99, "USD"), "url")  // Can't mix up!
+  ```
+</Accordion>
+
+## Benefits
+
+### Type Safety
+
+The Money type prevents common errors:
+
+```kotlin
+// Bad: Easy to confuse price with quantity
+fun calculateTotal(price: Double, quantity: Int): Double {
+    return price * quantity
+}
+calculateTotal(5, 19.99)  // Oops, swapped parameters!
+
+// Good: Type system enforces correctness
+fun calculateTotal(price: Money, quantity: Int): Money {
+    return price.copy(amount = price.amount * quantity)
+}
+calculateTotal(Money(19.99, "$"), 5)  // Clear intent
+```
+
+### Domain Clarity
+
+Money makes the domain model more expressive:
+
+```kotlin
+// Clear that these are monetary values
+data class Cart(val items: List<CartItem>) {
+    fun getSubtotal(): Money? { /* ... */ }
+}
+
+data class CartItem(
+    val id: String,
+    val name: String,
+    val money: Money,  // Obviously a price
+    val quantity: Int  // Obviously a count
+)
+```
+
+### Consistency
+
+All monetary values across components use the same structure:
+
+```kotlin
+// Product component
+data class Product(
+    val money: Money
+)
+
+// Cart component
+data class CartItem(
+    val money: Money
+)
+
+// Wishlist component
+data class WishlistItem(
+    val money: Money
+)
+```
+
+<Tip>
+Consistent use of `Money` makes it easy to move data between components without conversion logic.
+</Tip>
+
+## Usage Examples
+
+### Creating Money Values
+
+```kotlin
+// Simple creation
+val price = Money(19.99, "$")
+val euroPrice = Money(17.50, "€")
+val yenPrice = Money(2000.0, "¥")
+
+// From API data
+val product = Product(
+    id = "1",
+    name = "Laptop",
+    money = Money(jsonProduct.price, jsonProduct.currency),
+    imageUrl = jsonProduct.imageUrl
+)
+```
+
+### Calculations
+
+```kotlin
+// In Cart domain model
+data class Cart(val cartItems: List<CartItem>) {
+    fun getSubtotal(): Money? {
+        return if (cartItems.isNotEmpty()) {
+            val currency = cartItems[0].money.currencySymbol
+            var subtotal = 0.0
+            cartItems.forEach {
+                subtotal += it.money.amount * it.quantity
+            }
+            Money(subtotal, currency)
+        } else {
+            null
+        }
+    }
+}
+```
+
+<Warning>
+The current implementation assumes all items in a cart share the same currency. For multi-currency support, you'd need additional logic.
+</Warning>
+
+### Display Formatting
+
+```kotlin
+// In UI layer
+@Composable
+fun MoneyText(money: Money) {
+    Text(text = "${money.currencySymbol}${String.format("%.2f", money.amount)}")
+}
+
+// Usage
+MoneyText(Money(19.99, "$"))  // Displays: $19.99
+MoneyText(Money(17.5, "€"))   // Displays: €17.50
+```
+
+### Mapping Between Layers
+
+```kotlin
+// Data layer to domain layer
+fun mapToProduct(dto: JsonProductResponseDTO): Product {
+    return Product(
+        id = dto.id.toString(),
+        name = dto.name,
+        money = Money(dto.price, dto.currency),  // DTO -> Domain
+        imageUrl = dto.imageUrl
+    )
+}
+
+// Domain layer to data layer
+fun mapToDto(wishlistItem: WishlistItem): JsonWishlistItemCacheDTO {
+    return JsonWishlistItemCacheDTO(
+        id = wishlistItem.id,
+        name = wishlistItem.name,
+        price = wishlistItem.money.amount,      // Domain -> DTO
+        currency = wishlistItem.money.currencySymbol,
+        imageUrl = wishlistItem.imageUrl
+    )
+}
+```
+
+## Value Object Pattern
+
+The Money type is a **Value Object** in Domain-Driven Design terminology:
+
+<Steps>
+  <Step title="Immutable">
+    Money is a `data class` with `val` properties - once created, it cannot be changed
+  </Step>
+  <Step title="Equality by value">
+    Two Money instances with the same amount and currency are considered equal
+  </Step>
+  <Step title="No identity">
+    Money objects don't have a unique ID - they're defined entirely by their values
+  </Step>
+  <Step title="Self-validating">
+    Money encapsulates its invariants (though this simple implementation could be enhanced)
+  </Step>
+</Steps>
+
+```kotlin
+// Immutability
+val price = Money(10.0, "$")
+price.amount = 20.0  // Compilation error!
+
+// Value equality
+val price1 = Money(10.0, "$")
+val price2 = Money(10.0, "$")
+price1 == price2  // true
+
+// Creating new values instead of mutating
+val discountedPrice = price1.copy(amount = price1.amount * 0.9)
+```
+
+## Potential Enhancements
+
+While the current implementation is simple and effective, here are some enhancements you might consider:
+
+<Accordion title="Enhanced Money Implementation">
+  ```kotlin
+  data class Money private constructor(
+      val amount: Double,
+      val currencySymbol: String
+  ) {
+      init {
+          require(amount >= 0) { "Money amount cannot be negative" }
+          require(currencySymbol.isNotBlank()) { "Currency symbol required" }
+      }
+      
+      operator fun plus(other: Money): Money {
+          require(currencySymbol == other.currencySymbol) {
+              "Cannot add different currencies"
+          }
+          return Money(amount + other.amount, currencySymbol)
+      }
+      
+      operator fun times(multiplier: Int): Money {
+          return Money(amount * multiplier, currencySymbol)
+      }
+      
+      fun format(): String {
+          return "$currencySymbol${String.format("%.2f", amount)}"
+      }
+      
+      companion object {
+          fun of(amount: Double, currencySymbol: String): Money {
+              return Money(amount, currencySymbol)
+          }
+      }
+  }
+  ```
+
+  **Enhancements:**
+  - Input validation (no negative amounts)
+  - Arithmetic operators (+, *, etc.)
+  - Currency mismatch detection
+  - Built-in formatting
+  - Factory method for controlled construction
+</Accordion>
+
+## Testing
+
+The Money type is straightforward to test:
+
+```kotlin
+@Test
+fun `money equality works by value`() {
+    val money1 = Money(10.0, "$")
+    val money2 = Money(10.0, "$")
+    assertEquals(money1, money2)
+}
+
+@Test
+fun `money with different amounts are not equal`() {
+    val money1 = Money(10.0, "$")
+    val money2 = Money(20.0, "$")
+    assertNotEquals(money1, money2)
+}
+
+@Test
+fun `money with different currencies are not equal`() {
+    val money1 = Money(10.0, "$")
+    val money2 = Money(10.0, "€")
+    assertNotEquals(money1, money2)
+}
+
+@Test
+fun `copy creates new instance with updated values`() {
+    val original = Money(10.0, "$")
+    val doubled = original.copy(amount = original.amount * 2)
+    
+    assertEquals(10.0, original.amount)
+    assertEquals(20.0, doubled.amount)
+    assertEquals("$", doubled.currencySymbol)
+}
+```
+
+## Real-World Usage
+
+Here's how Money flows through a typical operation:
+
+```kotlin
+// 1. API returns product data
+val apiResponse = JsonProductResponseDTO(
+    id = 1,
+    name = "Wireless Mouse",
+    price = 29.99,
+    currency = "$",
+    imageUrl = "https://..."
+)
+
+// 2. Repository maps to domain model
+val product = Product(
+    id = "1",
+    name = "Wireless Mouse",
+    money = Money(29.99, "$"),  // Created here
+    imageUrl = "https://..."
+)
+
+// 3. User adds to cart
+val cartItem = CartItem(
+    id = product.id,
+    name = product.name,
+    money = product.money,      // Passed along
+    imageUrl = product.imageUrl,
+    quantity = 2
+)
+
+// 4. Cart calculates subtotal
+val cart = Cart(listOf(cartItem))
+val subtotal = cart.getSubtotal()  // Money(59.98, "$")
+
+// 5. UI displays formatted price
+Text("${subtotal?.currencySymbol}${subtotal?.amount}")  // "$59.98"
+```
+
+<Note>
+Notice how the Money object flows seamlessly through all layers without needing conversion or transformation.
+</Note>
+
+## Architecture Impact
+
+The Money component demonstrates several architectural principles:
+
+<CardGroup cols={2}>
+  <Card title="Value Objects" icon="gem">
+    Money is a pure value object with no identity or mutable state
+  </Card>
+  <Card title="Avoid Primitives" icon="ban">
+    Using Money instead of separate Double and String prevents errors
+  </Card>
+  <Card title="Domain Language" icon="book">
+    Money makes the domain model speak the language of the business
+  </Card>
+  <Card title="Cross-Component" icon="arrows-alt">
+    Shared across Product, Cart, and Wishlist components
+  </Card>
+</CardGroup>
+
+## Related Components
+
+<CardGroup cols={2}>
+  <Card title="Product Component" icon="box" href="/components/product-component">
+    Uses Money for product pricing
+  </Card>
+  <Card title="Cart Component" icon="shopping-cart" href="/components/cart-component">
+    Uses Money for item prices and subtotals
+  </Card>
+  <Card title="Wishlist Component" icon="heart" href="/components/wishlist-component">
+    Uses Money for wishlist item prices
+  </Card>
+  <Card title="Domain Layer" icon="cube" href="/architecture/clean-architecture">
+    Learn more about domain modeling
+  </Card>
+</CardGroup>

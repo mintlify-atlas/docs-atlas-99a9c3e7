@@ -1,0 +1,270 @@
+---
+title: Testing Overview
+description: Comprehensive testing strategy for Real Clean Architecture in Android
+---
+
+The Real Clean Architecture project implements a robust testing strategy that ensures reliability and maintainability across all architectural layers. Each layer is tested independently using appropriate testing techniques and utilities.
+
+## Testing Philosophy
+
+The testing approach follows these core principles:
+
+- **Test Isolation**: Each layer is tested independently with minimal dependencies
+- **Test Utilities**: Reusable test doubles and utilities reduce boilerplate
+- **Real Examples**: Tests use concrete examples that document expected behavior
+- **Fast Feedback**: Unit tests run quickly without external dependencies
+
+## Test Pyramid
+
+The project follows the testing pyramid approach:
+
+<Steps>
+  <Step title="Unit Tests (Base)">
+    The foundation consists of comprehensive unit tests for:
+    - Domain models and business logic
+    - Use cases with test repositories
+    - Data repositories with test cache providers
+    - ViewModels with test use cases
+  </Step>
+  
+  <Step title="Integration Tests (Middle)">
+    Integration tests verify layer interactions:
+    - Repository tests with real cache implementations
+    - Network layer tests with NetMock
+    - Flow-based state management tests
+  </Step>
+  
+  <Step title="UI Tests (Top)">
+    Screenshot tests for UI components:
+    - Compose preview screenshot tests
+    - Visual regression testing
+  </Step>
+</Steps>
+
+## Testing Strategy Per Layer
+
+### Domain Layer Testing
+
+The domain layer contains pure business logic that is highly testable.
+
+<AccordionGroup>
+  <Accordion title="Use Cases">
+    Use cases are tested with test implementations of repositories and other dependencies.
+    
+    **Example**: Testing `AddToWishlistUseCase`
+    ```kotlin
+    class AddToWishlistUseCaseTest {
+        private val testWishlistRepository = TestWishlistRepository()
+        private val sut = AddToWishlistUseCase({ USER }, testWishlistRepository)
+
+        @Test
+        fun `EXPECT delegation to repository`() {
+            sut(WISHLIST_ITEM)
+
+            assertEquals(
+                listOf(USER_ID to WISHLIST_ITEM),
+                testWishlistRepository.addToWishlistInvocations
+            )
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Domain Models">
+    Domain models with business logic are tested to verify their behavior.
+    
+    **Example**: Testing `Cart` model calculations
+    ```kotlin
+    @Test
+    fun `EXPECT sum of product per their quantity WHEN cart is not empty`() {
+        val sut = Cart(
+            listOf(
+                makeCartItem(0.99, 1),
+                makeCartItem(25.00, 3),
+                makeCartItem(30.00, 2),
+                makeCartItem(15.00, 1)
+            )
+        )
+
+        val result = sut.getSubtotal()
+
+        assertEquals(Money(150.99, "$"), result)
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Value Objects">
+    Value objects with validation logic are thoroughly tested.
+    
+    **Example**: Testing `Email` validation
+    ```kotlin
+    @Test
+    fun `EXPECT valid email WHEN valid email entered`() {
+        val result = Email("test@address.com").isValid()
+        assertTrue(result)
+    }
+
+    @Test
+    fun `EXPECT invalid email WHEN domain entered`() {
+        val result = Email("test.com").isValid()
+        assertFalse(result)
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Data Layer Testing
+
+The data layer is tested using test implementations of infrastructure dependencies.
+
+<CardGroup cols={2}>
+  <Card title="Repository Tests" icon="database">
+    Repositories are tested with `TestCacheProvider` and `NetMock` for network calls.
+    
+    See [RealCartRepositoryTest.kt](https://github.com/DenisBronx/Real-Clean-Architecture-In-Android---Sample/blob/main/cart-component/src/commonTest/kotlin/com/denisbrandi/androidrealca/cart/data/repository/RealCartRepositoryTest.kt)
+  </Card>
+  
+  <Card title="Network Integration" icon="network-wired">
+    Network calls are tested using NetMock library for deterministic HTTP responses.
+    
+    See [RealUserRepositoryTest.kt](https://github.com/DenisBronx/Real-Clean-Architecture-In-Android---Sample/blob/main/user-component/src/commonTest/kotlin/com/denisbrandi/androidrealca/user/data/repository/RealUserRepositoryTest.kt)
+  </Card>
+</CardGroup>
+
+**Example**: Testing repository with cache
+```kotlin
+class RealCartRepositoryTest {
+    private val cacheProvider = TestCacheProvider(
+        "cart-cache",
+        JsonCartCacheDto(emptyMap())
+    )
+    private val sut = RealCartRepository(cacheProvider)
+
+    @Test
+    fun `EXPECT data saved and cart updates emitted`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        val finalCart = Cart(listOf(CART_ITEM))
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        assertEquals(
+            listOf(Cart(emptyList()), finalCart),
+            cartObserver.getValues()
+        )
+    }
+}
+```
+
+### Presentation Layer Testing
+
+ViewModels are tested using test implementations of use cases and the `FlowTestObserver`.
+
+**Example**: Testing `RealCartViewModel`
+```kotlin
+class RealCartViewModelTest {
+    @get:Rule
+    val rule = MainCoroutineRule()
+
+    private val observeUserCart = TestObserveUserCart()
+    private lateinit var sut: RealCartViewModel
+    private lateinit var stateObserver: FlowTestObserver<CartScreenState>
+
+    @Before
+    fun setUp() {
+        sut = RealCartViewModel(observeUserCart, updateCartItem, StateDelegate())
+        stateObserver = sut.state.test()
+    }
+
+    @Test
+    fun `EXPECT cart updates`() = runTest {
+        observeUserCart.cartUpdates.emit(CART)
+
+        assertEquals(
+            listOf(
+                CartScreenState(Cart(emptyList())),
+                CartScreenState(CART)
+            ),
+            stateObserver.getValues()
+        )
+    }
+}
+```
+
+<Note>
+  The `MainCoroutineRule` ensures coroutines run on the test dispatcher for deterministic testing.
+</Note>
+
+## Coverage Approach
+
+<Info>
+  The project prioritizes **meaningful coverage** over percentage targets. Each piece of business logic is tested, while framework code and simple delegations may be skipped.
+</Info>
+
+### What to Test
+
+- Business logic in domain models and use cases
+- Repository implementations with cache and network interactions
+- ViewModel state management and user interactions
+- Validation logic in value objects
+- Error handling and edge cases
+
+### What Not to Test
+
+- Simple data classes without logic
+- Framework code (Compose UI, dependency injection)
+- Pure delegation without transformation
+- Generated code (serialization, Room entities)
+
+## Test Organization
+
+Tests are co-located with source code:
+
+```
+cart-component/
+├── src/
+│   ├── commonMain/kotlin/  # Production code
+│   └── commonTest/kotlin/  # Tests
+│       ├── data/
+│       │   └── repository/
+│       │       └── RealCartRepositoryTest.kt
+│       └── domain/
+│           ├── model/
+│           │   ├── CartTest.kt
+│           │   └── CartItemFixture.kt
+│           ├── repository/
+│           │   └── TestCartRepository.kt
+│           └── usecase/
+│               ├── AddCartItemUseCaseTest.kt
+│               └── ObserveUserCartUseCaseTest.kt
+```
+
+<Warning>
+  Test doubles (like `TestCartRepository`) are placed in the test source alongside tests, not in production code.
+</Warning>
+
+## Test Naming Convention
+
+All tests follow the pattern:
+```
+EXPECT [expected outcome] WHEN [condition]
+```
+
+**Examples**:
+- `EXPECT item added to cart WHEN not present`
+- `EXPECT quantity increased WHEN item already present in cart`
+- `EXPECT invalid email error WHEN login request has invalid email`
+
+This convention makes tests self-documenting and clearly communicates intent.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Unit Testing" icon="flask" href="/testing/unit-testing">
+    Learn how to write unit tests for each architectural layer
+  </Card>
+  
+  <Card title="Test Utilities" icon="toolbox" href="/testing/test-utilities">
+    Explore reusable test utilities and test doubles
+  </Card>
+</CardGroup>

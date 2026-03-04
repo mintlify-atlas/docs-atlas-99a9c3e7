@@ -1,0 +1,524 @@
+---
+title: "Wishlist Component"
+description: "User wishlist management with reactive state and local persistence"
+---
+
+The Wishlist Component manages user favorites, allowing users to save products they're interested in. It provides reactive state management with Flow-based caching for real-time updates.
+
+## Overview
+
+The wishlist component provides:
+- **Add/remove items** from user wishlist
+- **Reactive state updates** using Kotlin Flow
+- **Local persistence** via JSON caching
+- **User-scoped wishlists** supporting multiple users
+- **Wishlist ID tracking** for quick lookups
+
+<Info>
+The wishlist component integrates with the user component for user context and shares the same product model as the cart component.
+</Info>
+
+## Domain Model
+
+### WishlistItem
+
+Represents a product saved to the wishlist.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.model
+
+import com.denisbrandi.androidrealca.money.domain.model.Money
+
+data class WishlistItem(
+    val id: String,
+    val name: String,
+    val money: Money,
+    val imageUrl: String
+)
+```
+
+<ParamField path="id" type="String">
+  Unique identifier for the product
+</ParamField>
+
+<ParamField path="name" type="String">
+  Product display name
+</ParamField>
+
+<ParamField path="money" type="Money">
+  Price information with amount and currency
+</ParamField>
+
+<ParamField path="imageUrl" type="String">
+  URL to product image
+</ParamField>
+
+<Note>
+`WishlistItem` is structurally similar to `Product` but represents a different concept in the domain. Products come from the catalog, wishlist items are user-specific.
+</Note>
+
+## Repository Interface
+
+The repository defines the contract for wishlist operations.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.repository
+
+import com.denisbrandi.androidrealca.wishlist.domain.model.WishlistItem
+import kotlinx.coroutines.flow.Flow
+
+internal interface WishlistRepository {
+    fun addToWishlist(userId: String, wishlistItem: WishlistItem)
+    fun removeFromWishlist(userId: String, wishlistItemId: String)
+    fun observeWishlist(userId: String): Flow<List<WishlistItem>>
+}
+```
+
+<ParamField path="addToWishlist" type="(String, WishlistItem) -> Unit">
+  Adds an item to the user's wishlist (idempotent - won't duplicate)
+</ParamField>
+
+<ParamField path="removeFromWishlist" type="(String, String) -> Unit">
+  Removes an item by ID from the user's wishlist
+</ParamField>
+
+<ParamField path="observeWishlist" type="(String) -> Flow<List<WishlistItem>>">
+  Returns a Flow that emits the current wishlist whenever it changes
+</ParamField>
+
+## Use Cases
+
+The wishlist component provides four use cases for wishlist operations.
+
+### AddToWishlistUseCase
+
+Adds a product to the user's wishlist.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.usecase
+
+import com.denisbrandi.androidrealca.user.domain.usecase.GetUser
+import com.denisbrandi.androidrealca.wishlist.domain.model.WishlistItem
+import com.denisbrandi.androidrealca.wishlist.domain.repository.WishlistRepository
+
+internal class AddToWishlistUseCase(
+    private val getUser: GetUser,
+    private val wishlistRepository: WishlistRepository
+) : AddToWishlist {
+    override fun invoke(wishlistItem: WishlistItem) {
+        wishlistRepository.addToWishlist(getUser().id, wishlistItem)
+    }
+}
+```
+
+<Tip>
+The use case automatically gets the current user ID, so consumers don't need to manage user context.
+</Tip>
+
+### RemoveFromWishlistUseCase
+
+Removes a product from the user's wishlist.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.usecase
+
+import com.denisbrandi.androidrealca.user.domain.usecase.GetUser
+import com.denisbrandi.androidrealca.wishlist.domain.repository.WishlistRepository
+
+internal class RemoveFromWishlistUseCase(
+    private val getUser: GetUser,
+    private val wishlistRepository: WishlistRepository
+) : RemoveFromWishlist {
+    override fun invoke(wishlistItemId: String) {
+        wishlistRepository.removeFromWishlist(getUser().id, wishlistItemId)
+    }
+}
+```
+
+### ObserveUserWishlistUseCase
+
+Observes the complete wishlist with full item details.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.usecase
+
+import com.denisbrandi.androidrealca.user.domain.usecase.GetUser
+import com.denisbrandi.androidrealca.wishlist.domain.model.WishlistItem
+import com.denisbrandi.androidrealca.wishlist.domain.repository.WishlistRepository
+import kotlinx.coroutines.flow.Flow
+
+internal class ObserveUserWishlistUseCase(
+    private val getUser: GetUser,
+    private val wishlistRepository: WishlistRepository
+) : ObserveUserWishlist {
+    override fun invoke(): Flow<List<WishlistItem>> {
+        return wishlistRepository.observeWishlist(getUser().id)
+    }
+}
+```
+
+### ObserveUserWishlistIdsUseCase
+
+Observes just the wishlist item IDs for efficient lookups.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.usecase
+
+import kotlinx.coroutines.flow.*
+
+internal class ObserveUserWishlistIdsUseCase(
+    private val observeUserWishlist: ObserveUserWishlist
+) : ObserveUserWishlistIds {
+    override fun invoke(): Flow<List<String>> {
+        return observeUserWishlist().map { list -> list.map { item -> item.id } }
+    }
+}
+```
+
+<Accordion title="Why separate ID observation?">
+  **Performance**: When you only need to check "is this item in the wishlist?", you don't need full item data
+
+  **UI efficiency**: Product lists can show heart icons without loading full wishlist details
+
+  **Composition**: Built on top of `ObserveUserWishlist`, demonstrating use case composition
+</Accordion>
+
+### Use Case Interfaces
+
+Functional interfaces for all wishlist operations:
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.domain.usecase
+
+import com.denisbrandi.androidrealca.wishlist.domain.model.WishlistItem
+import kotlinx.coroutines.flow.Flow
+
+fun interface AddToWishlist {
+    operator fun invoke(wishlistItem: WishlistItem)
+}
+
+fun interface RemoveFromWishlist {
+    operator fun invoke(wishlistItemId: String)
+}
+
+fun interface ObserveUserWishlist {
+    operator fun invoke(): Flow<List<WishlistItem>>
+}
+
+fun interface ObserveUserWishlistIds {
+    operator fun invoke(): Flow<List<String>>
+}
+```
+
+## Data Layer
+
+The data layer implements wishlist persistence using reactive caching.
+
+### RealWishlistRepository
+
+Implements the `WishlistRepository` interface with Flow-based caching.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.data.repository
+
+import com.denisbrandi.androidrealca.cache.*
+import com.denisbrandi.androidrealca.money.domain.model.Money
+import com.denisbrandi.androidrealca.wishlist.data.model.*
+import com.denisbrandi.androidrealca.wishlist.domain.model.WishlistItem
+import com.denisbrandi.androidrealca.wishlist.domain.repository.WishlistRepository
+import kotlinx.coroutines.flow.*
+
+internal class RealWishlistRepository(
+    private val cacheProvider: CacheProvider
+) : WishlistRepository {
+
+    private val flowCachedObject: FlowCachedObject<JsonWishlistCacheDto> by lazy {
+        cacheProvider.getFlowCachedObject(
+            fileName = "wishlist-cache",
+            serializer = JsonWishlistCacheDto.serializer(),
+            defaultValue = JsonWishlistCacheDto(emptyMap())
+        )
+    }
+
+    override fun addToWishlist(userId: String, wishlistItem: WishlistItem) {
+        val updatedCache = getUpdatedCacheForUser(userId) { userWishlist ->
+            if (userWishlist.find { it.id == wishlistItem.id } == null) {
+                userWishlist.add(mapToDto(wishlistItem))
+            }
+        }
+        flowCachedObject.put(updatedCache)
+    }
+
+    override fun removeFromWishlist(userId: String, wishlistItemId: String) {
+        val updatedCache = getUpdatedCacheForUser(userId) { userWishlist ->
+            userWishlist.find { it.id == wishlistItemId }?.let { itemToRemove ->
+                userWishlist.remove(itemToRemove)
+            }
+        }
+        flowCachedObject.put(updatedCache)
+    }
+
+    private fun getUpdatedCacheForUser(
+        userId: String,
+        onUserWishlist: (MutableList<JsonWishlistItemCacheDTO>) -> Unit
+    ): JsonWishlistCacheDto {
+        val usersWishlist = flowCachedObject.get().usersWishlist
+        val userWishlist = usersWishlist[userId].orEmpty().toMutableList()
+        return JsonWishlistCacheDto(
+            usersWishlist = usersWishlist.toMutableMap().apply {
+                put(
+                    userId,
+                    userWishlist.apply {
+                        onUserWishlist(this)
+                    }.toList()
+                )
+            }
+        )
+    }
+
+    override fun observeWishlist(userId: String): Flow<List<WishlistItem>> {
+        return flowCachedObject.observe().map { cachedDto ->
+            mapToWishlistItems(cachedDto.usersWishlist[userId] ?: emptyList())
+        }
+    }
+
+    private fun mapToWishlistItems(dtos: List<JsonWishlistItemCacheDTO>): List<WishlistItem> {
+        return dtos.map { dto ->
+            WishlistItem(
+                id = dto.id,
+                name = dto.name,
+                money = Money(dto.price, dto.currency),
+                imageUrl = dto.imageUrl
+            )
+        }
+    }
+
+    private fun mapToDto(wishlistItem: WishlistItem): JsonWishlistItemCacheDTO {
+        return JsonWishlistItemCacheDTO(
+            id = wishlistItem.id,
+            name = wishlistItem.name,
+            price = wishlistItem.money.amount,
+            currency = wishlistItem.money.currencySymbol,
+            imageUrl = wishlistItem.imageUrl
+        )
+    }
+}
+```
+
+<Steps>
+  <Step title="Get current cache">
+    Retrieves the current cached wishlist state
+  </Step>
+  <Step title="Update user's list">
+    Modifies only the specific user's wishlist (immutable update pattern)
+  </Step>
+  <Step title="Write to cache">
+    Persists the updated cache, triggering Flow emissions
+  </Step>
+  <Step title="Observers notified">
+    All subscribers to `observeWishlist()` receive the updated list
+  </Step>
+</Steps>
+
+<Warning>
+**Idempotent adds**: The implementation checks for duplicates before adding. Calling `addToWishlist()` multiple times with the same item won't create duplicates.
+</Warning>
+
+### Cache DTOs
+
+Data transfer objects for JSON serialization.
+
+```kotlin
+package com.denisbrandi.androidrealca.wishlist.data.model
+
+import kotlinx.serialization.*
+
+@Serializable
+data class JsonWishlistCacheDto(
+    @SerialName("usersWishlist") val usersWishlist: Map<String, List<JsonWishlistItemCacheDTO>>
+)
+
+@Serializable
+data class JsonWishlistItemCacheDTO(
+    @SerialName("id") val id: String,
+    @SerialName("name") val name: String,
+    @SerialName("price") val price: Double,
+    @SerialName("currency") val currency: String,
+    @SerialName("imageUrl") val imageUrl: String
+)
+```
+
+<Note>
+The cache structure uses a `Map<String, List<...>>` to support multiple users, where the key is the user ID.
+</Note>
+
+## Usage Example
+
+Here's how the wishlist component is used in the Product List Page:
+
+```kotlin
+// In PLPViewModel
+internal interface PLPViewModel : StateViewModel<PLPScreenState> {
+    fun isFavourite(productId: String): Boolean
+    fun addProductToWishlist(product: Product)
+    fun removeProductFromWishlist(productId: String)
+}
+
+internal data class PLPScreenState(
+    val fullName: String,
+    val wishlistIds: List<String> = emptyList(),
+    val displayState: DisplayState? = null
+)
+
+// In ViewModel implementation:
+class RealPLPViewModel(
+    private val observeUserWishlistIds: ObserveUserWishlistIds,
+    private val addToWishlist: AddToWishlist,
+    private val removeFromWishlist: RemoveFromWishlist
+) : PLPViewModel {
+    
+    init {
+        // Observe wishlist IDs for showing heart icons
+        observeUserWishlistIds()
+            .onEach { wishlistIds ->
+                updateState { currentState ->
+                    currentState.copy(wishlistIds = wishlistIds)
+                }
+            }
+            .launchIn(viewModelScope)
+    }
+    
+    override fun isFavourite(productId: String): Boolean {
+        return state.value.wishlistIds.contains(productId)
+    }
+    
+    override fun addProductToWishlist(product: Product) {
+        val wishlistItem = WishlistItem(
+            id = product.id,
+            name = product.name,
+            money = product.money,
+            imageUrl = product.imageUrl
+        )
+        addToWishlist(wishlistItem)
+    }
+    
+    override fun removeProductFromWishlist(productId: String) {
+        removeFromWishlist(productId)
+    }
+}
+
+// In Compose UI:
+@Composable
+fun ProductCard(product: Product, viewModel: PLPViewModel) {
+    Card {
+        // ... product details ...
+        
+        IconButton(
+            onClick = {
+                if (viewModel.isFavourite(product.id)) {
+                    viewModel.removeProductFromWishlist(product.id)
+                } else {
+                    viewModel.addProductToWishlist(product)
+                }
+            }
+        ) {
+            Icon(
+                imageVector = if (viewModel.isFavourite(product.id)) {
+                    Icons.Filled.Favorite
+                } else {
+                    Icons.Outlined.FavoriteBorder
+                },
+                contentDescription = "Wishlist"
+            )
+        }
+    }
+}
+```
+
+<Tip>
+Using `ObserveUserWishlistIds` instead of the full wishlist makes the UI more efficient - you only load IDs for checking favorites, not full item details.
+</Tip>
+
+## Reactive State Flow
+
+The wishlist component demonstrates reactive state management:
+
+```kotlin
+// 1. User clicks heart icon on a product
+addToWishlist(wishlistItem)
+
+// 2. Repository updates cache
+flowCachedObject.put(updatedCache)
+
+// 3. Flow emits new value
+flowCachedObject.observe()  // emits updated cache
+
+// 4. Repository maps to domain models
+.map { cachedDto -> mapToWishlistItems(...) }
+
+// 5. ViewModel receives update
+observeUserWishlistIds()
+    .onEach { wishlistIds ->
+        updateState { state.copy(wishlistIds = wishlistIds) }
+    }
+
+// 6. UI re-renders with new state
+// Heart icon changes from outlined to filled
+```
+
+<Info>
+This reactive flow ensures the UI always reflects the current wishlist state, even if items are added/removed from different screens.
+</Info>
+
+## Testing
+
+The functional interfaces enable straightforward testing:
+
+```kotlin
+// Test repository
+class TestWishlistRepository : WishlistRepository {
+    private val wishlists = mutableMapOf<String, MutableList<WishlistItem>>()
+    
+    override fun addToWishlist(userId: String, wishlistItem: WishlistItem) {
+        wishlists.getOrPut(userId) { mutableListOf() }.add(wishlistItem)
+    }
+    
+    override fun removeFromWishlist(userId: String, wishlistItemId: String) {
+        wishlists[userId]?.removeIf { it.id == wishlistItemId }
+    }
+    
+    override fun observeWishlist(userId: String): Flow<List<WishlistItem>> {
+        return flowOf(wishlists[userId] ?: emptyList())
+    }
+}
+
+// Test use case
+@Test
+fun `adding item to wishlist stores it`() {
+    val repository = TestWishlistRepository()
+    val getUser = GetUser { User("user-123", "Test") }
+    val addToWishlist = AddToWishlistUseCase(getUser, repository)
+    
+    val item = WishlistItem("1", "Product", Money(10.0, "$"), "url")
+    addToWishlist(item)
+    
+    val wishlist = repository.observeWishlist("user-123").first()
+    assertEquals(1, wishlist.size)
+    assertEquals(item, wishlist[0])
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Product Component" icon="box" href="/components/product-component">
+    Learn about product models
+  </Card>
+  <Card title="Cart Component" icon="shopping-cart" href="/components/cart-component">
+    See similar reactive state management
+  </Card>
+  <Card title="User Component" icon="user" href="/components/user-component">
+    Understand user context integration
+  </Card>
+  <Card title="Caching" icon="database" href="/libraries/cache">
+    Deep dive into the caching system
+  </Card>
+</CardGroup>

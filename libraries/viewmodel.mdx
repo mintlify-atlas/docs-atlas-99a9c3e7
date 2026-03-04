@@ -1,0 +1,410 @@
+---
+title: ViewModel Library
+description: Framework-agnostic ViewModel utilities with state and event management
+---
+
+The ViewModel library provides abstractions for managing UI state and events in a framework-agnostic way, using Kotlin Flow for reactive programming.
+
+## Core Interfaces
+
+### StateViewModel
+
+Interface for ViewModels that expose a reactive state.
+
+```kotlin
+interface StateViewModel<State> {
+    val state: StateFlow<State>
+}
+```
+
+**Purpose:**
+- Exposes UI state as a StateFlow
+- Provides read-only access to state from the UI layer
+- Ensures single source of truth for state
+
+### EventViewModel
+
+Interface for ViewModels that emit one-time events.
+
+```kotlin
+interface EventViewModel<ViewEvent> {
+    val viewEvent: Flow<ViewEvent>
+}
+```
+
+**Purpose:**
+- Handles one-time UI events (navigation, showing dialogs, etc.)
+- Uses Flow instead of StateFlow to avoid event replay
+- Separates events from state for clearer architecture
+
+## Delegate Implementations
+
+### StateDelegate
+
+Reusable delegate for managing state in ViewModels.
+
+```kotlin
+class StateDelegate<State> : StateViewModel<State> {
+    private lateinit var _state: MutableStateFlow<State>
+    override val state: StateFlow<State>
+        get() = _state.asStateFlow()
+
+    fun setDefaultState(state: State) {
+        _state = MutableStateFlow(state)
+    }
+
+    fun updateState(block: (State) -> State) {
+        _state.update {
+            block(it)
+        }
+    }
+}
+```
+
+**Key Methods:**
+- `setDefaultState()`: Initialize the state (typically in ViewModel init block)
+- `updateState()`: Atomically update state using the current value
+
+### EventDelegate
+
+Reusable delegate for emitting one-time events from ViewModels.
+
+```kotlin
+class EventDelegate<ViewEvent> : EventViewModel<ViewEvent> {
+    private val _viewEvent = MutableSharedFlow<ViewEvent>()
+    override val viewEvent: Flow<ViewEvent> = _viewEvent.asSharedFlow()
+
+    fun sendEvent(scope: CoroutineScope, newEvent: ViewEvent) {
+        scope.launch {
+            _viewEvent.emit(newEvent)
+        }
+    }
+}
+```
+
+**Key Methods:**
+- `sendEvent()`: Emit a one-time event to the UI layer
+
+<Note>
+Uses `MutableSharedFlow` instead of `MutableStateFlow` to ensure events are not replayed when new collectors subscribe.
+</Note>
+
+## Usage Examples
+
+### Basic ViewModel with State
+
+Example from `CartViewModel` showing state-only ViewModel:
+
+```kotlin
+internal interface CartViewModel : StateViewModel<CartScreenState> {
+    fun updateCartItemQuantity(cartItem: CartItem)
+}
+
+internal data class CartScreenState(val cart: Cart)
+```
+
+### ViewModel Implementation with StateDelegate
+
+Example from `RealCartViewModel` showing delegation pattern:
+
+```kotlin
+internal class RealCartViewModel(
+    observeUserCart: ObserveUserCart,
+    private val updateCartItem: UpdateCartItem,
+    private val stateDelegate: StateDelegate<CartScreenState>
+) : CartViewModel, StateViewModel<CartScreenState> by stateDelegate, ViewModel() {
+
+    init {
+        stateDelegate.setDefaultState(CartScreenState(Cart(emptyList())))
+        observeUserCart().onEach { cart ->
+            stateDelegate.updateState { CartScreenState(cart) }
+        }.launchIn(viewModelScope)
+    }
+
+    override fun updateCartItemQuantity(cartItem: CartItem) {
+        updateCartItem(cartItem)
+    }
+}
+```
+
+<Accordion title="Delegation Pattern Explained">
+The ViewModel uses Kotlin's delegation (`by stateDelegate`) to implement the `StateViewModel` interface:
+
+- `StateDelegate` is injected as a dependency
+- The `by` keyword delegates the `state` property to the delegate
+- Internal methods like `updateState()` are called directly on the delegate
+- This separates state management logic from business logic
+</Accordion>
+
+### Step-by-Step ViewModel Creation
+
+<Steps>
+
+<Step title="Define the state model">
+Create a data class representing your screen state:
+
+```kotlin
+data class CartScreenState(
+    val cart: Cart,
+    val isLoading: Boolean = false,
+    val error: String? = null
+)
+```
+</Step>
+
+<Step title="Define the ViewModel interface">
+Extend StateViewModel and/or EventViewModel:
+
+```kotlin
+interface CartViewModel : StateViewModel<CartScreenState> {
+    fun updateCartItemQuantity(cartItem: CartItem)
+    fun removeItem(itemId: String)
+}
+```
+</Step>
+
+<Step title="Implement the ViewModel">
+Use delegation for state management:
+
+```kotlin
+class RealCartViewModel(
+    private val useCases: CartUseCases,
+    private val stateDelegate: StateDelegate<CartScreenState>
+) : CartViewModel, 
+    StateViewModel<CartScreenState> by stateDelegate,
+    ViewModel() {
+    
+    init {
+        stateDelegate.setDefaultState(CartScreenState(Cart(emptyList())))
+        // Initialize state from use cases
+    }
+    
+    override fun updateCartItemQuantity(cartItem: CartItem) {
+        // Implement business logic
+    }
+}
+```
+</Step>
+
+<Step title="Observe state in UI">
+Collect the state in your composable or activity:
+
+```kotlin
+@Composable
+fun CartScreen(viewModel: CartViewModel) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    
+    // Render UI based on state
+    CartContent(
+        cart = state.cart,
+        onItemUpdate = viewModel::updateCartItemQuantity
+    )
+}
+```
+</Step>
+
+</Steps>
+
+### ViewModel with Events
+
+Example showing both state and events:
+
+```kotlin
+sealed class ProductEvent {
+    data class ShowError(val message: String) : ProductEvent()
+    data class NavigateToDetail(val productId: String) : ProductEvent()
+}
+
+data class ProductListState(
+    val products: List<Product> = emptyList(),
+    val isLoading: Boolean = false
+)
+
+class ProductViewModel(
+    private val getProducts: GetProducts,
+    private val stateDelegate: StateDelegate<ProductListState>,
+    private val eventDelegate: EventDelegate<ProductEvent>
+) : StateViewModel<ProductListState> by stateDelegate,
+    EventViewModel<ProductEvent> by eventDelegate,
+    ViewModel() {
+
+    init {
+        stateDelegate.setDefaultState(ProductListState())
+        loadProducts()
+    }
+
+    private fun loadProducts() {
+        viewModelScope.launch {
+            stateDelegate.updateState { it.copy(isLoading = true) }
+            
+            when (val result = getProducts()) {
+                is Answer.Success -> {
+                    stateDelegate.updateState { 
+                        it.copy(
+                            products = result.data,
+                            isLoading = false
+                        )
+                    }
+                }
+                is Answer.Error -> {
+                    stateDelegate.updateState { it.copy(isLoading = false) }
+                    eventDelegate.sendEvent(
+                        viewModelScope,
+                        ProductEvent.ShowError("Failed to load products")
+                    )
+                }
+            }
+        }
+    }
+
+    fun onProductClick(productId: String) {
+        eventDelegate.sendEvent(
+            viewModelScope,
+            ProductEvent.NavigateToDetail(productId)
+        )
+    }
+}
+```
+
+### Observing Events in UI
+
+```kotlin
+@Composable
+fun ProductListScreen(viewModel: ProductViewModel) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val navController = LocalNavController.current
+    
+    LaunchedEffect(Unit) {
+        viewModel.viewEvent.collect { event ->
+            when (event) {
+                is ProductEvent.ShowError -> {
+                    // Show snackbar or dialog
+                }
+                is ProductEvent.NavigateToDetail -> {
+                    navController.navigate("product/${event.productId}")
+                }
+            }
+        }
+    }
+    
+    ProductListContent(
+        state = state,
+        onProductClick = viewModel::onProductClick
+    )
+}
+```
+
+<Warning>
+Always collect events in a `LaunchedEffect` to ensure proper lifecycle handling and avoid memory leaks.
+</Warning>
+
+## Testing ViewModels
+
+### Testing State Updates
+
+```kotlin
+class CartViewModelTest {
+    private val observeUserCart = mock<ObserveUserCart>()
+    private val updateCartItem = mock<UpdateCartItem>()
+    private val stateDelegate = StateDelegate<CartScreenState>()
+    
+    private lateinit var viewModel: RealCartViewModel
+    
+    @Test
+    fun `updates state when cart changes`() = runTest {
+        val cartFlow = MutableStateFlow(Cart(emptyList()))
+        whenever(observeUserCart()).thenReturn(cartFlow)
+        
+        viewModel = RealCartViewModel(
+            observeUserCart,
+            updateCartItem,
+            stateDelegate
+        )
+        
+        val newCart = Cart(listOf(cartItem))
+        cartFlow.emit(newCart)
+        
+        assertEquals(newCart, viewModel.state.value.cart)
+    }
+}
+```
+
+<Tip>
+Inject delegates as dependencies to enable easier testing and verification of state changes.
+</Tip>
+
+## Architecture Benefits
+
+<CardGroup cols={2}>
+
+<Card title="Framework Agnostic" icon="code">
+Not tied to Android's ViewModel - can be used in any Kotlin context including KMP.
+</Card>
+
+<Card title="Separation of Concerns" icon="layer-group">
+Delegates separate state management from business logic, making ViewModels cleaner.
+</Card>
+
+<Card title="Testable" icon="vial">
+Delegates can be easily mocked or replaced in tests for isolated unit testing.
+</Card>
+
+<Card title="Reusable" icon="recycle">
+Delegates can be reused across multiple ViewModels without duplicating code.
+</Card>
+
+</CardGroup>
+
+## When to Use State vs Events
+
+<Info>
+**Use State for:** Persistent UI data that can be re-rendered (loading states, data lists, form values)
+</Info>
+
+<Info>
+**Use Events for:** One-time actions that shouldn't replay (navigation, showing toasts, triggering animations)
+</Info>
+
+## Best Practices
+
+<Steps>
+
+<Step title="Initialize state early">
+Always call `setDefaultState()` in the ViewModel's init block:
+
+```kotlin
+init {
+    stateDelegate.setDefaultState(InitialState)
+}
+```
+</Step>
+
+<Step title="Use updateState for modifications">
+Prefer `updateState()` over directly setting state for atomic updates:
+
+```kotlin
+// Good
+stateDelegate.updateState { it.copy(isLoading = true) }
+
+// Avoid - not atomic
+stateDelegate.setDefaultState(state.value.copy(isLoading = true))
+```
+</Step>
+
+<Step title="Immutable state">
+Use data classes and copy for state updates to ensure immutability:
+
+```kotlin
+data class State(val items: List<Item>)
+
+stateDelegate.updateState { 
+    it.copy(items = it.items + newItem)
+}
+```
+</Step>
+
+<Step title="Single source of truth">
+Expose only StateFlow/Flow (read-only) to the UI, keep mutable versions private.
+</Step>
+
+</Steps>

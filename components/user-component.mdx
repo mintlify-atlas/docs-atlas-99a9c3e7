@@ -1,0 +1,480 @@
+---
+title: "User Component"
+description: "User authentication with validation, network requests, and local caching"
+---
+
+The User Component manages user authentication, providing login functionality with email and password validation. It demonstrates domain-driven validation, network authentication, and persistent user sessions.
+
+## Overview
+
+The user component provides:
+- **User authentication** via network API
+- **Email and password validation** at the domain layer
+- **Type-safe error handling** with specific error types
+- **User session management** with local caching
+- **Login state tracking** for the application
+
+<Info>
+The user component is a foundational component used by cart, wishlist, and other components to identify the current user.
+</Info>
+
+## Domain Models
+
+The user component defines several domain models for authentication.
+
+### User
+
+Represents an authenticated user.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.model
+
+data class User(val id: String, val fullName: String)
+```
+
+<ParamField path="id" type="String">
+  Unique identifier for the user
+</ParamField>
+
+<ParamField path="fullName" type="String">
+  User's full display name
+</ParamField>
+
+### LoginRequest
+
+Credentials for authentication.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.model
+
+data class LoginRequest(val email: String, val password: String)
+```
+
+### Email (Value Object)
+
+Encapsulates email validation logic.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.model
+
+class Email(private val value: String) {
+    fun isValid(): Boolean {
+        return value.isNotBlank() && value.matches(Regex(EMAIL_ADDRESS_PATTERN))
+    }
+
+    private companion object {
+        const val EMAIL_ADDRESS_PATTERN =
+            "(?:[a-zA-Z0-9!#\$%&'*+/=?^_`{|}~-]+(?:\\.[a-zA-Z0-9!#\$%&'*+/=?^_`{|}~-]+)*|\"(?:[\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f\\x21\\x23-\\x5b\\x5d-\\x7f]|\\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f])*\")@(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?|\\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-zA-Z0-9-]*[a-zA-Z0-9]:(?:[\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f\\x21-\\x5a\\x53-\\x7f]|\\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f])+)\\])"
+    }
+}
+```
+
+<Tip>
+The `Email` class is a **value object** that encapsulates validation logic, preventing invalid emails from entering the domain layer.
+</Tip>
+
+### Password (Value Object)
+
+Encapsulates password validation rules.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.model
+
+class Password(private val value: String) {
+    fun isValid(): Boolean {
+        return value.length >= 8
+    }
+}
+```
+
+<Note>
+Password validation requires a minimum of 8 characters. Add more complex rules as needed for production.
+</Note>
+
+### LoginError
+
+Sealed interface defining all possible login errors.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.model
+
+sealed interface LoginError {
+    data object InvalidEmail : LoginError
+    data object InvalidPassword : LoginError
+    data object GenericError : LoginError
+    data object IncorrectCredentials : LoginError
+}
+```
+
+<Accordion title="Error Types Explained">
+  **InvalidEmail**: Email format is invalid (fails regex validation)
+
+  **InvalidPassword**: Password is too short (less than 8 characters)
+
+  **IncorrectCredentials**: Server returned 401 (wrong email/password)
+
+  **GenericError**: Network error or other unexpected failure
+</Accordion>
+
+## Repository Interface
+
+The repository defines the contract for user operations.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.repository
+
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.user.domain.model.*
+
+internal interface UserRepository {
+    suspend fun login(loginRequest: LoginRequest): Answer<Unit, LoginError>
+    fun getUser(): User
+    fun isLoggedIn(): Boolean
+}
+```
+
+<ParamField path="login" type="suspend (LoginRequest) -> Answer<Unit, LoginError>">
+  Authenticates user and stores session. Returns specific error on failure.
+</ParamField>
+
+<ParamField path="getUser" type="() -> User">
+  Returns the currently logged-in user. Assumes user is logged in.
+</ParamField>
+
+<ParamField path="isLoggedIn" type="() -> Boolean">
+  Checks if a user session exists.
+</ParamField>
+
+## Use Cases
+
+The user component provides three main use cases.
+
+### LoginUseCase
+
+Handles login with domain-level validation.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.usecase
+
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.user.domain.model.*
+import com.denisbrandi.androidrealca.user.domain.repository.UserRepository
+
+internal class LoginUseCase(
+    private val userRepository: UserRepository
+) : Login {
+    override suspend fun invoke(loginRequest: LoginRequest): Answer<Unit, LoginError> {
+        return when {
+            !Email(loginRequest.email).isValid() -> {
+                Answer.Error(LoginError.InvalidEmail)
+            }
+
+            !Password(loginRequest.password).isValid() -> {
+                Answer.Error(LoginError.InvalidPassword)
+            }
+
+            else -> {
+                return userRepository.login(loginRequest)
+            }
+        }
+    }
+}
+```
+
+<Steps>
+  <Step title="Validate email">
+    Uses Email value object to check format validity
+  </Step>
+  <Step title="Validate password">
+    Uses Password value object to check length requirement
+  </Step>
+  <Step title="Delegate to repository">
+    If validation passes, calls repository for network authentication
+  </Step>
+</Steps>
+
+<Warning>
+Validation happens **before** the network call, saving bandwidth and providing instant feedback to users.
+</Warning>
+
+### Use Case Interfaces
+
+Functional interfaces for each operation:
+
+```kotlin
+package com.denisbrandi.androidrealca.user.domain.usecase
+
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.user.domain.model.*
+
+fun interface Login {
+    suspend operator fun invoke(loginRequest: LoginRequest): Answer<Unit, LoginError>
+}
+
+fun interface GetUser {
+    operator fun invoke(): User
+}
+
+fun interface IsUserLoggedIn {
+    operator fun invoke(): Boolean
+}
+```
+
+## Data Layer
+
+The data layer implements authentication via HTTP and caches the user session.
+
+### RealUserRepository
+
+Implements the `UserRepository` interface with networking and caching.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.data.repository
+
+import com.denisbrandi.androidrealca.cache.*
+import com.denisbrandi.androidrealca.foundations.Answer
+import com.denisbrandi.androidrealca.httpclient.AccessTokenProvider
+import com.denisbrandi.androidrealca.user.data.model.*
+import com.denisbrandi.androidrealca.user.domain.model.*
+import com.denisbrandi.androidrealca.user.domain.repository.UserRepository
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.*
+import io.ktor.client.statement.HttpResponse
+import io.ktor.http.*
+
+internal class RealUserRepository(
+    private val client: HttpClient,
+    cacheProvider: CacheProvider
+) : UserRepository {
+
+    private val cachedObject: CachedObject<JsonUserCacheDTO> by lazy {
+        cacheProvider.getCachedObject(
+            fileName = "user-cache",
+            serializer = JsonUserCacheDTO.serializer(),
+            defaultValue = DEFAULT_USER
+        )
+    }
+
+    override suspend fun login(loginRequest: LoginRequest): Answer<Unit, LoginError> {
+        return try {
+            val response =
+                client.post("https://api.json-generator.com/templates/Q7s_NUVpyBND/data") {
+                    headers {
+                        append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                        val accessTokenHeader = AccessTokenProvider.getAccessTokenHeader()
+                        append(accessTokenHeader.first, accessTokenHeader.second)
+                    }
+                    setBody(JsonLoginRequestDTO(loginRequest.email, loginRequest.password))
+                }
+            if (response.status.isSuccess()) {
+                handleSuccessfulLoginResponse(response)
+            } else {
+                handleFailingLoginResponse(response)
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
+            Answer.Error(LoginError.GenericError)
+        }
+    }
+
+    private suspend fun handleSuccessfulLoginResponse(httpResponse: HttpResponse): Answer<Unit, LoginError> {
+        val responseBody = httpResponse.body<JsonLoginResponseDTO>()
+        cachedObject.put(JsonUserCacheDTO(responseBody.id, responseBody.fullName))
+        return Answer.Success(Unit)
+    }
+
+    private fun handleFailingLoginResponse(httpResponse: HttpResponse): Answer<Unit, LoginError> {
+        val error = if (httpResponse.status.value == 401) {
+            LoginError.IncorrectCredentials
+        } else {
+            LoginError.GenericError
+        }
+        return Answer.Error(error)
+    }
+
+    override fun getUser(): User {
+        val cachedUser = cachedObject.get()
+        return User(cachedUser.id, cachedUser.fullName)
+    }
+
+    override fun isLoggedIn(): Boolean {
+        return cachedObject.get() != DEFAULT_USER
+    }
+
+    companion object {
+        val DEFAULT_USER = JsonUserCacheDTO("", "")
+    }
+}
+```
+
+<Accordion title="Implementation Highlights">
+  **HTTP POST for login**: Sends credentials to authentication endpoint
+
+  **Status code mapping**: 401 → IncorrectCredentials, other errors → GenericError
+
+  **Persistent session**: Stores user data in cache after successful login
+
+  **Default user pattern**: Uses empty DTO to represent "not logged in" state
+</Accordion>
+
+### Data Transfer Objects
+
+DTOs for network and cache serialization.
+
+```kotlin
+package com.denisbrandi.androidrealca.user.data.model
+
+import kotlinx.serialization.*
+
+@Serializable
+internal class JsonLoginRequestDTO(
+    @SerialName("email") val email: String,
+    @SerialName("password") val password: String
+)
+
+@Serializable
+internal class JsonLoginResponseDTO(
+    @SerialName("id") val id: String,
+    @SerialName("fullName") val fullName: String
+)
+
+@Serializable
+internal data class JsonUserCacheDTO(
+    @SerialName("id") val id: String,
+    @SerialName("fullName") val fullName: String
+)
+```
+
+<Note>
+**JsonLoginRequestDTO**: Sent to server with credentials
+
+**JsonLoginResponseDTO**: Received from server on success
+
+**JsonUserCacheDTO**: Stored locally for session persistence
+</Note>
+
+## Value Objects Pattern
+
+The user component demonstrates the **Value Object** pattern for domain validation:
+
+```kotlin
+// Instead of primitive obsession:
+fun validateEmail(email: String): Boolean { /* ... */ }
+
+// Use value objects:
+class Email(private val value: String) {
+    fun isValid(): Boolean { /* ... */ }
+}
+
+// Benefits:
+// 1. Encapsulation - validation logic lives with the data
+// 2. Type safety - can't accidentally pass email as password
+// 3. Reusability - validation is consistent everywhere
+// 4. Testability - easy to test Email in isolation
+```
+
+<Tip>
+Value objects are a key DDD (Domain-Driven Design) pattern that makes your domain model more expressive and robust.
+</Tip>
+
+## Usage Example
+
+Here's how the user component is used throughout the application:
+
+```kotlin
+// In Login UI ViewModel
+class LoginViewModel(
+    private val login: Login,
+    private val isUserLoggedIn: IsUserLoggedIn
+) {
+    
+    fun attemptLogin(email: String, password: String) {
+        viewModelScope.launch {
+            val result = login(LoginRequest(email, password))
+            
+            result.fold(
+                success = {
+                    // Navigate to main screen
+                    navigateToHome()
+                },
+                error = { loginError ->
+                    when (loginError) {
+                        LoginError.InvalidEmail -> showError("Invalid email format")
+                        LoginError.InvalidPassword -> showError("Password must be 8+ characters")
+                        LoginError.IncorrectCredentials -> showError("Wrong email or password")
+                        LoginError.GenericError -> showError("Network error, try again")
+                    }
+                }
+            )
+        }
+    }
+}
+
+// In other components (Cart, Wishlist, etc.)
+class AddCartItemUseCase(
+    private val getUser: GetUser,
+    private val cartRepository: CartRepository
+) {
+    override fun invoke(cartItem: CartItem) {
+        val userId = getUser().id  // Get current user ID
+        cartRepository.updateCartItem(userId, cartItem)
+    }
+}
+```
+
+<Warning>
+Always call `isUserLoggedIn()` before accessing `getUser()` in contexts where the user might not be authenticated.
+</Warning>
+
+## Testing
+
+The functional interface design enables easy testing:
+
+```kotlin
+// Test doubles
+val testGetUser = GetUser {
+    User(id = "test-123", fullName = "Test User")
+}
+
+val testIsUserLoggedIn = IsUserLoggedIn { true }
+
+val testLogin = Login { request ->
+    if (request.email == "test@example.com" && request.password == "password123") {
+        Answer.Success(Unit)
+    } else {
+        Answer.Error(LoginError.IncorrectCredentials)
+    }
+}
+
+// Test Email validation
+@Test
+fun `email validation rejects invalid format`() {
+    val email = Email("invalid-email")
+    assertFalse(email.isValid())
+}
+
+@Test
+fun `password validation requires 8 characters`() {
+    val shortPassword = Password("short")
+    val validPassword = Password("longpassword")
+    
+    assertFalse(shortPassword.isValid())
+    assertTrue(validPassword.isValid())
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Cart Component" icon="shopping-cart" href="/components/cart-component">
+    See how cart uses user context
+  </Card>
+  <Card title="Wishlist Component" icon="heart" href="/components/wishlist-component">
+    Learn about wishlist user integration
+  </Card>
+  <Card title="Foundations" icon="building" href="/libraries/foundations">
+    Understand the Answer type pattern
+  </Card>
+  <Card title="Clean Architecture" icon="cube" href="/architecture/clean-architecture">
+    Learn more about domain modeling
+  </Card>
+</CardGroup>

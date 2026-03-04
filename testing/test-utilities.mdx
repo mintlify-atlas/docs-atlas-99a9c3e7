@@ -1,0 +1,485 @@
+---
+title: Test Utilities
+description: Reusable test utilities and test doubles for efficient testing
+---
+
+The Real Clean Architecture project includes several reusable test utilities that simplify testing and reduce boilerplate. These utilities are extracted into dedicated modules.
+
+## Test Utility Modules
+
+<CardGroup cols={3}>
+  <Card title="cache-test" icon="database">
+    In-memory cache implementations for testing
+  </Card>
+  
+  <Card title="coroutines-test-dispatcher" icon="arrows-spin">
+    JUnit rule for coroutine testing
+  </Card>
+  
+  <Card title="flow-test-observer" icon="eye">
+    Flow observer for collecting emitted values
+  </Card>
+</CardGroup>
+
+## Cache Test Utilities
+
+### TestCacheProvider
+
+The `TestCacheProvider` is a test implementation of `CacheProvider` that uses in-memory storage.
+
+```kotlin
+class TestCacheProvider(
+    private val expectedFileName: String,
+    private val expectedDefaultValue: Any
+) : CacheProvider {
+
+    lateinit var providedCachedObject: InMemoryCachedObject<*>
+
+    override fun <T : Any> getCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): CachedObject<T> {
+        return if (expectedFileName == fileName && expectedDefaultValue == defaultValue) {
+            InMemoryCachedObject(defaultValue).also {
+                providedCachedObject = it
+            }
+        } else {
+            throw IllegalStateException("getCachedObject not stubbed")
+        }
+    }
+
+    override fun <T : Any> getFlowCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): FlowCachedObject<T> {
+        return RealFlowCachedObject(getCachedObject(fileName, serializer, defaultValue))
+    }
+}
+```
+
+<Info>
+  The `TestCacheProvider` validates that repositories request cache with expected parameters, catching configuration errors.
+</Info>
+
+#### Usage Example
+
+```kotlin
+class RealCartRepositoryTest {
+    private val cacheProvider = TestCacheProvider(
+        "cart-cache",
+        JsonCartCacheDto(emptyMap())
+    )
+    private val sut = RealCartRepository(cacheProvider)
+
+    @Test
+    fun `EXPECT data saved and cart updates emitted`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        val finalCart = Cart(listOf(CART_ITEM))
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        // Access the cached object directly for verification
+        assertEquals(EXPECTED_DTO, cacheProvider.providedCachedObject.get())
+    }
+}
+```
+
+### InMemoryCachedObject
+
+The `InMemoryCachedObject` provides an in-memory implementation of `CachedObject` for testing.
+
+```kotlin
+class InMemoryCachedObject<T : Any>(
+    defaultValue: T
+) : CachedObject<T> {
+
+    private var cachedValue = defaultValue
+
+    override fun put(value: T) {
+        cachedValue = value
+    }
+
+    override fun get(): T {
+        return cachedValue
+    }
+}
+```
+
+<Tip>
+  `InMemoryCachedObject` is created automatically by `TestCacheProvider`, but you can also use it directly for testing custom cache logic.
+</Tip>
+
+## Coroutines Test Dispatcher
+
+### MainCoroutineRule
+
+The `MainCoroutineRule` is a JUnit rule that replaces the main dispatcher with a test dispatcher for deterministic coroutine testing.
+
+```kotlin
+class MainCoroutineRule : TestWatcher() {
+
+    private val testDispatcher = UnconfinedTestDispatcher()
+
+    override fun starting(description: Description?) {
+        Dispatchers.setMain(testDispatcher)
+    }
+
+    override fun finished(description: Description?) {
+        Dispatchers.resetMain()
+    }
+}
+```
+
+<Warning>
+  Always include `MainCoroutineRule` when testing ViewModels or other classes that use `Dispatchers.Main`.
+</Warning>
+
+#### Usage Example
+
+```kotlin
+class RealCartViewModelTest {
+    @get:Rule
+    val rule = MainCoroutineRule()
+
+    private lateinit var sut: RealCartViewModel
+
+    @Before
+    fun setUp() {
+        sut = RealCartViewModel(observeUserCart, updateCartItem, StateDelegate())
+    }
+
+    @Test
+    fun `EXPECT cart updates`() = runTest {
+        // Coroutines run on the test dispatcher
+        observeUserCart.cartUpdates.emit(CART)
+        
+        // State changes happen immediately
+        assertEquals(expectedState, stateObserver.getValues().last())
+    }
+}
+```
+
+<Steps>
+  <Step title="Apply the Rule">
+    Use `@get:Rule` to apply the `MainCoroutineRule` to your test class.
+  </Step>
+  
+  <Step title="Write Tests Normally">
+    Use `runTest` for suspend functions. Coroutines execute immediately on the test dispatcher.
+  </Step>
+  
+  <Step title="Automatic Cleanup">
+    The rule automatically resets the main dispatcher after each test.
+  </Step>
+</Steps>
+
+## Flow Test Observer
+
+### FlowTestObserver
+
+The `FlowTestObserver` collects all values emitted by a Flow for easy assertion in tests.
+
+```kotlin
+class FlowTestObserver<T : Any>(
+    private val flow: Flow<T>,
+    coroutineScope: CoroutineScope
+) {
+    private val emittedValues = mutableListOf<T>()
+    private val job: Job = flow.onEach {
+        emittedValues.add(it)
+    }.launchIn(coroutineScope)
+
+    fun getValues() = emittedValues
+
+    fun stopObserving() {
+        job.cancel()
+    }
+
+    fun getFlow() = flow
+}
+
+fun <T : Any> Flow<T>.test(
+    coroutineScope: CoroutineScope = CoroutineScope(UnconfinedTestDispatcher())
+) = FlowTestObserver(this, coroutineScope)
+```
+
+#### Usage Examples
+
+<AccordionGroup>
+  <Accordion title="Testing Repository Flow Emissions">
+    ```kotlin
+    @Test
+    fun `EXPECT data saved and cart updates emitted`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        assertEquals(
+            listOf(Cart(emptyList()), Cart(listOf(CART_ITEM))),
+            cartObserver.getValues()
+        )
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Testing Use Case Flow">
+    ```kotlin
+    @Test
+    fun `EXPECT cart updates`() {
+        testCartRepository.cartUpdates[USER_ID] = flowOf(
+            Cart(emptyList()), 
+            Cart(CART_ITEMS)
+        )
+
+        val testObserver = sut().test()
+
+        assertEquals(
+            listOf(Cart(emptyList()), Cart(CART_ITEMS)),
+            testObserver.getValues()
+        )
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Testing ViewModel State">
+    ```kotlin
+    @Test
+    fun `EXPECT cart updates`() = runTest {
+        val stateObserver = sut.state.test()
+        
+        observeUserCart.cartUpdates.emit(CART)
+
+        assertEquals(
+            listOf(
+                CartScreenState(Cart(emptyList())),
+                CartScreenState(CART)
+            ),
+            stateObserver.getValues()
+        )
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  The `.test()` extension function creates a `FlowTestObserver` with sensible defaults. You can provide a custom coroutine scope if needed.
+</Note>
+
+### Managing Observer Lifecycle
+
+You can control when to stop observing:
+
+```kotlin
+@Test
+fun `EXPECT updates only while observing`() {
+    val observer = sut.observeCart(USER_ID).test()
+    
+    sut.updateCartItem(USER_ID, CART_ITEM_1)
+    observer.stopObserving()
+    sut.updateCartItem(USER_ID, CART_ITEM_2) // Not collected
+    
+    assertEquals(
+        listOf(Cart(emptyList()), Cart(listOf(CART_ITEM_1))),
+        observer.getValues()
+    )
+}
+```
+
+## Test Repository Implementations
+
+Each component includes test implementations of its repositories for use in use case tests.
+
+### Example: TestCartRepository
+
+```kotlin
+class TestCartRepository : CartRepository {
+    val updateCartItemInvocations: MutableList<Pair<String, CartItem>> = mutableListOf()
+    val cartUpdates = mutableMapOf<String, Flow<Cart>>()
+    val carts = mutableMapOf<String, Cart>()
+
+    override fun updateCartItem(userId: String, cartItem: CartItem) {
+        updateCartItemInvocations.add(userId to cartItem)
+    }
+
+    override fun observeCart(userId: String): Flow<Cart> {
+        return cartUpdates[userId] ?: throw IllegalStateException("no stubbing for userId")
+    }
+
+    override fun getCart(userId: String): Cart {
+        return carts[userId] ?: throw IllegalStateException("no stubbing for userId")
+    }
+}
+```
+
+<Tip>
+  Test repositories track invocations for verification and allow stubbing return values through public properties.
+</Tip>
+
+#### Usage Pattern
+
+```kotlin
+class ObserveUserCartUseCaseTest {
+    private val testCartRepository = TestCartRepository()
+    private val sut = ObserveUserCartUseCase({ USER }, testCartRepository)
+
+    @Test
+    fun `EXPECT cart updates`() {
+        // Stub the return value
+        testCartRepository.cartUpdates[USER_ID] = flowOf(Cart(emptyList()), Cart(CART_ITEMS))
+
+        // Execute
+        val testObserver = sut().test()
+
+        // Verify
+        assertEquals(
+            listOf(Cart(emptyList()), Cart(CART_ITEMS)),
+            testObserver.getValues()
+        )
+    }
+}
+```
+
+## Test Fixtures
+
+Test fixtures provide reusable test data creation.
+
+### Example: CartItemFixture
+
+```kotlin
+fun makeCartItem(
+    price: Double = 99.99,
+    quantity: Int = 1,
+    id: String = "1",
+    name: String = "Wireless Headphones",
+    imageUrl: String = "https://m.media-amazon.com/images/I/61fU3njgzZL._AC_SL1500_.jpg",
+    currency: String = "$"
+) = CartItem(
+    id = id,
+    name = name,
+    price = Money(price, currency),
+    imageUrl = imageUrl,
+    quantity = quantity
+)
+```
+
+<Info>
+  Fixture functions use default parameters so tests only specify values relevant to the test case.
+</Info>
+
+### Usage
+
+```kotlin
+@Test
+fun `EXPECT sum of product per their quantity WHEN cart is not empty`() {
+    val sut = Cart(
+        listOf(
+            makeCartItem(price = 0.99, quantity = 1),
+            makeCartItem(price = 25.00, quantity = 3),
+            makeCartItem(price = 30.00, quantity = 2),
+            makeCartItem(price = 15.00, quantity = 1)
+        )
+    )
+
+    val result = sut.getSubtotal()
+
+    assertEquals(Money(150.99, "$"), result)
+}
+```
+
+## Network Testing with NetMock
+
+While not a custom utility, the project uses [NetMock](https://github.com/denisbrandi/netmock) for deterministic HTTP testing.
+
+```kotlin
+class RealUserRepositoryTest {
+    private val config = MockEngineConfig()
+    private val netMock = NetMockEngine(config)
+    private val client = createClient(netMock)
+
+    @Test
+    fun `EXPECT success and data cached WHEN response is successful`() = runTest {
+        netMock.addMock(
+            request = NetMockRequest(
+                requestUrl = "https://api.json-generator.com/templates/Q7s_NUVpyBND/data",
+                method = Method.Post,
+                mandatoryHeaders = REQUEST_HEADERS,
+                body = REQUEST_BODY
+            ),
+            response = {
+                code = 200
+                mandatoryHeaders = RESPONSE_HEADERS
+                body = RESPONSE_BODY
+            }
+        )
+
+        val result = sut.login(LOGIN_REQUEST)
+
+        assertEquals(Answer.Success(Unit), result)
+    }
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Deterministic" icon="check">
+    Mock responses are configured per test for predictable behavior
+  </Card>
+  
+  <Card title="Type-Safe" icon="shield">
+    Request and response matching with compile-time safety
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Test Utilities Consistently">
+    Apply the same test utilities across all tests for consistency and maintainability.
+  </Step>
+  
+  <Step title="Create Test Doubles per Component">
+    Each component provides test implementations of its public interfaces for use by other components.
+  </Step>
+  
+  <Step title="Minimize Test Boilerplate">
+    Use fixture functions and test utilities to keep tests focused on behavior, not setup.
+  </Step>
+  
+  <Step title="Verify All Emitted Values">
+    When testing Flows, verify the complete sequence of emitted values, not just the final state.
+  </Step>
+</Steps>
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Cache Testing" icon="database">
+    `TestCacheProvider` and `InMemoryCachedObject` for in-memory cache testing
+  </Card>
+  
+  <Card title="Coroutine Testing" icon="arrows-spin">
+    `MainCoroutineRule` for deterministic coroutine execution in tests
+  </Card>
+  
+  <Card title="Flow Testing" icon="eye">
+    `FlowTestObserver` for collecting and asserting Flow emissions
+  </Card>
+  
+  <Card title="Test Doubles" icon="masks-theater">
+    Component-specific test repositories and fixtures for reusable test data
+  </Card>
+</CardGroup>
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Unit Testing" icon="flask" href="/testing/unit-testing">
+    See these utilities in action in unit tests
+  </Card>
+  
+  <Card title="Testing Overview" icon="book" href="/testing/overview">
+    Understand the overall testing strategy
+  </Card>
+</CardGroup>

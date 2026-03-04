@@ -1,0 +1,573 @@
+---
+title: Unit Testing
+description: Writing effective unit tests for domain, data, and presentation layers
+---
+
+This guide demonstrates how to write unit tests for each layer of the Real Clean Architecture using real examples from the project.
+
+## Domain Layer Testing
+
+### Testing Use Cases
+
+Use cases contain business logic and orchestrate repositories. They are tested with test implementations of their dependencies.
+
+#### Example: AddCartItemUseCase
+
+This use case adds items to the cart, handling both new items and quantity updates for existing items.
+
+```kotlin
+class AddCartItemUseCaseTest {
+    private val getUser = GetUser { USER }
+    private val cartRepository = TestCartRepository()
+    private val updateCartItem = TestUpdateCartItem()
+    private val sut = AddCartItemUseCase(getUser, cartRepository, updateCartItem)
+
+    @Test
+    fun `EXPECT item added to cart WHEN not present`() {
+        cartRepository.carts[USER_ID] = Cart(listOf(makeCartItem().copy(id = "1345")))
+
+        sut(CART_ITEM)
+
+        assertEquals(
+            listOf(CART_ITEM),
+            updateCartItem.invocations
+        )
+    }
+
+    @Test
+    fun `EXPECT quantity increased WHEN item already present in cart`() {
+        cartRepository.carts[USER_ID] = Cart(CART_ITEMS)
+
+        sut(CART_ITEM)
+
+        assertEquals(
+            listOf(CART_ITEM.copy(quantity = 8)),
+            updateCartItem.invocations
+        )
+    }
+
+    private class TestUpdateCartItem : UpdateCartItem {
+        val invocations = mutableListOf<CartItem>()
+        override fun invoke(cartItem: CartItem) {
+            invocations.add(cartItem)
+        }
+    }
+
+    private companion object {
+        const val USER_ID = "1234"
+        val USER = User(USER_ID, "")
+        val CART_ITEM = makeCartItem(quantity = 3)
+        val CART_ITEMS = listOf(CART_ITEM.copy(quantity = 5))
+    }
+}
+```
+
+<Tip>
+  Notice how test doubles like `TestUpdateCartItem` are defined as nested classes when they're only used in one test class.
+</Tip>
+
+#### Example: LoginUseCase
+
+This use case validates credentials and delegates to the repository.
+
+```kotlin
+class LoginUseCaseTest {
+    private val userRepository = TestUserRepository().also {
+        it.expectedLoginRequest = VALID_LOGIN_REQUEST
+    }
+    private val sut = LoginUseCase(userRepository)
+
+    @Test
+    fun `EXPECT invalid email error WHEN login request has invalid email`() = runTest {
+        val loginRequestWithInvalidEmail = LoginRequest("", "validPassword")
+
+        val result = sut(loginRequestWithInvalidEmail)
+
+        assertEquals(Answer.Error(LoginError.InvalidEmail), result)
+    }
+
+    @Test
+    fun `EXPECT invalid password error WHEN login request has invalid password`() = runTest {
+        val loginRequestWithInvalidPassword = LoginRequest("valid@email.com", "")
+
+        val result = sut(loginRequestWithInvalidPassword)
+
+        assertEquals(Answer.Error(LoginError.InvalidPassword), result)
+    }
+
+    @Test
+    fun `EXPECT success WHEN login request is valid and repository returns success`() = runTest {
+        val repositoryResult = Answer.Success(Unit)
+        userRepository.loginResult = repositoryResult
+
+        val result = sut(VALID_LOGIN_REQUEST)
+
+        assertEquals(repositoryResult, result)
+    }
+
+    @Test
+    fun `EXPECT error WHEN login request is valid and repository returns error`() = runTest {
+        val repositoryResult = Answer.Error(LoginError.GenericError)
+        userRepository.loginResult = repositoryResult
+
+        val result = sut(VALID_LOGIN_REQUEST)
+
+        assertEquals(repositoryResult, result)
+    }
+
+    private companion object {
+        val VALID_LOGIN_REQUEST = LoginRequest("valid@email.com", "validPassword")
+    }
+}
+```
+
+<Note>
+  Suspend functions are tested using `runTest` from `kotlinx-coroutines-test`, which provides a controlled test environment for coroutines.
+</Note>
+
+### Testing Use Cases with Flow
+
+Use cases that return `Flow` are tested using the `FlowTestObserver` utility.
+
+```kotlin
+class ObserveUserCartUseCaseTest {
+    private val testCartRepository = TestCartRepository()
+    private val sut = ObserveUserCartUseCase({ USER }, testCartRepository)
+
+    @Test
+    fun `EXPECT cart updates`() {
+        testCartRepository.cartUpdates[USER_ID] = flowOf(Cart(emptyList()), Cart(CART_ITEMS))
+
+        val testObserver = sut().test()
+
+        assertEquals(
+            listOf(Cart(emptyList()), Cart(CART_ITEMS)),
+            testObserver.getValues()
+        )
+    }
+
+    private companion object {
+        const val USER_ID = "1234"
+        val USER = User(USER_ID, "")
+        val CART_ITEMS = listOf(makeCartItem())
+    }
+}
+```
+
+The `.test()` extension function creates a `FlowTestObserver` that collects all emitted values for assertion.
+
+### Testing Domain Models
+
+Domain models with business logic are tested to verify calculations and behavior.
+
+#### Example: Cart Model
+
+```kotlin
+class CartTest {
+    @Test
+    fun `EXPECT null subtotal and currency WHEN cart is empty`() {
+        val sut = Cart(emptyList())
+
+        val result = sut.getSubtotal()
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `EXPECT sum of product per their quantity WHEN cart is not empty`() {
+        val sut = Cart(
+            listOf(
+                makeCartItem(0.99, 1),
+                makeCartItem(25.00, 3),
+                makeCartItem(30.00, 2),
+                makeCartItem(15.00, 1)
+            )
+        )
+
+        val result = sut.getSubtotal()
+
+        assertEquals(Money(150.99, "$"), result)
+    }
+
+    @Test
+    fun `EXPECT 0 items WHEN cart is empty`() {
+        val sut = Cart(emptyList())
+
+        val result = sut.getNumberOfItems()
+
+        assertEquals(0, result)
+    }
+
+    @Test
+    fun `EXPECT number of items x their quantity WHEN items have quantity 1+`() {
+        val sut = Cart(listOf(makeCartItem(quantity = 4), makeCartItem(quantity = 5)))
+
+        val result = sut.getNumberOfItems()
+
+        assertEquals(9, result)
+    }
+}
+```
+
+### Testing Value Objects
+
+Value objects with validation are tested exhaustively.
+
+#### Example: Email Validation
+
+```kotlin
+class EmailTest {
+    @Test
+    fun `EXPECT invalid email WHEN no text entered`() {
+        val result = Email("").isValid()
+        assertFalse(result)
+    }
+
+    @Test
+    fun `EXPECT invalid email WHEN blank text entered`() {
+        val result = Email("  ").isValid()
+        assertFalse(result)
+    }
+
+    @Test
+    fun `EXPECT invalid email WHEN text entered`() {
+        val result = Email("a").isValid()
+        assertFalse(result)
+    }
+
+    @Test
+    fun `EXPECT invalid email WHEN domain entered`() {
+        val result = Email("test.com").isValid()
+        assertFalse(result)
+    }
+
+    @Test
+    fun `EXPECT invalid email WHEN at symbol entered`() {
+        val result = Email("test@").isValid()
+        assertFalse(result)
+    }
+
+    @Test
+    fun `EXPECT valid email WHEN valid email entered`() {
+        val result = Email("test@address.com").isValid()
+        assertTrue(result)
+    }
+}
+```
+
+<Info>
+  Validation logic is tested with multiple invalid cases to ensure robust validation.
+</Info>
+
+## Data Layer Testing
+
+### Testing Repositories
+
+Repositories are tested with test implementations of infrastructure dependencies.
+
+#### Example: RealCartRepository
+
+```kotlin
+class RealCartRepositoryTest {
+    private val cacheProvider = TestCacheProvider(
+        "cart-cache",
+        JsonCartCacheDto(emptyMap())
+    )
+    private val sut = RealCartRepository(cacheProvider)
+
+    @Test
+    fun `EXPECT data saved and cart updates emitted`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        val finalCart = Cart(listOf(CART_ITEM))
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        assertEquals(
+            listOf(Cart(emptyList()), finalCart),
+            cartObserver.getValues()
+        )
+    }
+
+    @Test
+    fun `EXPECT data added and cart updates emitted`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        sut.updateCartItem(USER_ID, CART_ITEM.copy(id = "2"))
+
+        val finalCart = Cart(listOf(CART_ITEM, CART_ITEM.copy(id = "2")))
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        assertEquals(
+            listOf(
+                Cart(emptyList()),
+                Cart(listOf(CART_ITEM)),
+                finalCart
+            ),
+            cartObserver.getValues()
+        )
+    }
+
+    @Test
+    fun `EXPECT quantity updated and cart updates emitted WHEN quantity is different`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        sut.updateCartItem(USER_ID, CART_ITEM.copy(quantity = 2))
+
+        val finalCart = Cart(listOf(CART_ITEM.copy(quantity = 2)))
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        assertEquals(
+            listOf(
+                Cart(emptyList()),
+                Cart(listOf(CART_ITEM)),
+                finalCart
+            ),
+            cartObserver.getValues()
+        )
+    }
+
+    @Test
+    fun `EXPECT no updates WHEN quantity is the same`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        val finalCart = Cart(listOf(CART_ITEM))
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        assertEquals(
+            listOf(
+                Cart(emptyList()),
+                finalCart
+            ),
+            cartObserver.getValues()
+        )
+    }
+
+    @Test
+    fun `EXPECT data removed and cart updates emitted WHEN quantity is 0`() {
+        val cartObserver = sut.observeCart(USER_ID).test()
+        sut.updateCartItem(USER_ID, CART_ITEM)
+
+        sut.updateCartItem(USER_ID, CART_ITEM.copy(quantity = 0))
+
+        val finalCart = Cart(emptyList())
+        assertEquals(finalCart, sut.getCart(USER_ID))
+        assertEquals(
+            listOf(
+                Cart(emptyList()),
+                Cart(listOf(CART_ITEM)),
+                finalCart
+            ),
+            cartObserver.getValues()
+        )
+    }
+
+    private companion object {
+        const val USER_ID = "1234"
+        val CART_ITEM = makeCartItem()
+    }
+}
+```
+
+<Warning>
+  Repository tests verify both the immediate result (via `getCart`) and the emitted flow values (via `observeCart`).
+</Warning>
+
+#### Testing with Network Calls
+
+Repositories with network dependencies use NetMock for deterministic HTTP responses.
+
+```kotlin
+class RealUserRepositoryTest {
+    private val config = MockEngineConfig()
+    private val netMock = NetMockEngine(config)
+    private val client = createClient(netMock)
+    private val cacheProvider = TestCacheProvider("user-cache", JsonUserCacheDTO("", ""))
+    private val sut = RealUserRepository(client, cacheProvider)
+
+    @Test
+    fun `EXPECT generic error WHEN response is 500`() = runTest {
+        netMock.addMock(
+            request = EXPECTED_REQUEST,
+            response = {
+                code = 500
+            }
+        )
+
+        val result = sut.login(LOGIN_REQUEST)
+
+        assertEquals(Answer.Error(LoginError.GenericError), result)
+    }
+
+    @Test
+    fun `EXPECT incorrect credentials WHEN response is 401`() = runTest {
+        netMock.addMock(
+            request = EXPECTED_REQUEST,
+            response = {
+                code = 401
+            }
+        )
+
+        val result = sut.login(LOGIN_REQUEST)
+
+        assertEquals(Answer.Error(LoginError.IncorrectCredentials), result)
+    }
+
+    @Test
+    fun `EXPECT success and data cached WHEN response is successful`() = runTest {
+        netMock.addMock(
+            request = EXPECTED_REQUEST,
+            response = {
+                code = 200
+                mandatoryHeaders = RESPONSE_HEADERS
+                body = RESPONSE_BODY
+            }
+        )
+
+        val result = sut.login(LOGIN_REQUEST)
+
+        assertEquals(Answer.Success(Unit), result)
+        assertEquals(EXPECTED_CACHED_OBJECT, cacheProvider.providedCachedObject.get())
+        assertTrue(sut.isLoggedIn())
+        assertEquals(User("AmazingAndroidDevId", "Amazing Android Dev"), sut.getUser())
+    }
+
+    private companion object {
+        val LOGIN_REQUEST = LoginRequest("valid@email.com", "12345678")
+        const val REQUEST_BODY = """{
+    "email": "valid@email.com",
+    "password": "12345678"
+}"""
+        const val RESPONSE_BODY = """{
+     "id": "AmazingAndroidDevId",
+     "fullName": "Amazing Android Dev"
+        }"""
+        val EXPECTED_REQUEST = NetMockRequest(
+            requestUrl = "https://api.json-generator.com/templates/Q7s_NUVpyBND/data",
+            method = Method.Post,
+            mandatoryHeaders = REQUEST_HEADERS,
+            body = REQUEST_BODY
+        )
+        val EXPECTED_CACHED_OBJECT = JsonUserCacheDTO("AmazingAndroidDevId", "Amazing Android Dev")
+    }
+}
+```
+
+## Presentation Layer Testing
+
+### Testing ViewModels
+
+ViewModels are tested using the `MainCoroutineRule` for coroutine testing and `FlowTestObserver` for state observation.
+
+```kotlin
+class RealCartViewModelTest {
+    @get:Rule
+    val rule = MainCoroutineRule()
+
+    private val observeUserCart = TestObserveUserCart()
+    private val updateCartItem = TestUpdateCartItem()
+    private lateinit var sut: RealCartViewModel
+    private lateinit var stateObserver: FlowTestObserver<CartScreenState>
+
+    @Before
+    fun setUp() {
+        sut = RealCartViewModel(observeUserCart, updateCartItem, StateDelegate())
+        stateObserver = sut.state.test()
+    }
+
+    @Test
+    fun `EXPECT cart updates`() = runTest {
+        observeUserCart.cartUpdates.emit(CART)
+
+        assertEquals(
+            listOf(
+                CartScreenState(Cart(emptyList())),
+                CartScreenState(CART)
+            ),
+            stateObserver.getValues()
+        )
+    }
+
+    @Test
+    fun `EXPECT cart updated`() {
+        sut.updateCartItemQuantity(CART_ITEM)
+
+        assertEquals(listOf(CART_ITEM), updateCartItem.invocations)
+    }
+
+    private class TestObserveUserCart : ObserveUserCart {
+        val cartUpdates = MutableStateFlow(Cart(emptyList()))
+        override fun invoke(): Flow<Cart> = cartUpdates
+    }
+
+    private class TestUpdateCartItem : UpdateCartItem {
+        val invocations = mutableListOf<CartItem>()
+        override fun invoke(cartItem: CartItem) {
+            invocations.add(cartItem)
+        }
+    }
+
+    private companion object {
+        val CART_ITEM = CartItem(
+            "1",
+            "Wireless Headphones",
+            Money(99.99, "$"),
+            "https://m.media-amazon.com/images/I/61fU3njgzZL._AC_SL1500_.jpg",
+            quantity = 1
+        )
+        val CART = Cart(listOf(CART_ITEM))
+    }
+}
+```
+
+<Steps>
+  <Step title="Setup MainCoroutineRule">
+    The `@get:Rule` annotation applies the `MainCoroutineRule` which sets the main dispatcher to a test dispatcher.
+  </Step>
+  
+  <Step title="Create Test Doubles">
+    Test implementations of use cases allow control over the data and behavior.
+  </Step>
+  
+  <Step title="Initialize ViewModel and Observer">
+    Set up the ViewModel with test dependencies and create a flow observer for state changes.
+  </Step>
+  
+  <Step title="Act and Assert">
+    Trigger actions and verify the expected state changes were emitted.
+  </Step>
+</Steps>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Descriptive Names" icon="tag">
+    Follow the `EXPECT [outcome] WHEN [condition]` naming pattern for clarity.
+  </Card>
+  
+  <Card title="Test One Thing" icon="bullseye">
+    Each test should verify a single behavior or scenario.
+  </Card>
+  
+  <Card title="Use Test Doubles" icon="masks-theater">
+    Create test implementations of interfaces rather than using mocking frameworks.
+  </Card>
+  
+  <Card title="Arrange-Act-Assert" icon="list-ol">
+    Structure tests with clear setup, execution, and verification phases.
+  </Card>
+</CardGroup>
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Test Utilities" icon="toolbox" href="/testing/test-utilities">
+    Learn about reusable test utilities and helpers
+  </Card>
+  
+  <Card title="Testing Overview" icon="book" href="/testing/overview">
+    Review the overall testing strategy
+  </Card>
+</CardGroup>

@@ -1,0 +1,344 @@
+---
+title: HTTP Client Library
+description: Ktor-based HTTP client with JSON serialization and timeout configuration
+---
+
+The HTTP Client library provides a configured Ktor HttpClient for network operations with built-in JSON serialization, timeout handling, and authentication support.
+
+## Core Interface
+
+### HttpClientProvider
+
+Simple interface for accessing the configured HTTP client.
+
+```kotlin
+interface HttpClientProvider {
+    fun getClient(): HttpClient
+}
+```
+
+**Purpose:**
+- Abstracts HTTP client creation and configuration
+- Enables easy mocking in tests
+- Provides a single source of truth for client configuration
+
+## Implementation
+
+### RealHttpClientProvider
+
+Production implementation using Ktor CIO engine with pre-configured plugins.
+
+```kotlin
+object RealHttpClientProvider : HttpClientProvider {
+
+    private val httpClient by lazy {
+        createClient(CIO.create())
+    }
+
+    fun createClient(engine: HttpClientEngine): HttpClient {
+        return HttpClient(engine) {
+            install(ContentNegotiation) {
+                json(
+                    Json {
+                        isLenient = true
+                        ignoreUnknownKeys = true
+                    }
+                )
+            }
+            install(HttpTimeout) {
+                requestTimeoutMillis = 3000L
+            }
+        }
+    }
+
+    override fun getClient(): HttpClient {
+        return httpClient
+    }
+}
+```
+
+### Configuration Details
+
+<Accordion title="ContentNegotiation Plugin">
+Configures automatic JSON serialization/deserialization using kotlinx.serialization:
+
+- **isLenient = true**: Allows lenient parsing of JSON (quotes, etc.)
+- **ignoreUnknownKeys = true**: Ignores JSON fields not defined in the data class
+
+This prevents crashes when the API returns additional fields not yet mapped in your models.
+</Accordion>
+
+<Accordion title="HttpTimeout Plugin">
+Sets timeout configurations for all requests:
+
+- **requestTimeoutMillis = 3000L**: 3-second timeout for entire request
+
+This prevents hanging requests and provides quick failure feedback.
+</Accordion>
+
+<Accordion title="CIO Engine">
+Uses Ktor's CIO (Coroutine I/O) engine:
+
+- Pure Kotlin implementation
+- No additional platform dependencies
+- Efficient coroutine-based I/O
+</Accordion>
+
+## Authentication
+
+### AccessTokenProvider
+
+Provides authentication headers for API requests.
+
+```kotlin
+object AccessTokenProvider {
+    fun getAccessTokenHeader(): Pair<String, String> {
+        return "Authorization" to "Bearer sghe50o5rkn9n9n1azs0ectmxnjjls7r9i1tksz3"
+    }
+}
+```
+
+<Warning>
+In production, access tokens should be retrieved from secure storage, not hardcoded. This example shows the pattern for demonstration purposes.
+</Warning>
+
+## Usage Examples
+
+### Making HTTP Requests in Repository
+
+Example from `RealProductRepository` showing HTTP client usage:
+
+```kotlin
+internal class RealProductRepository(
+    private val httpClient: HttpClient
+) : ProductRepository {
+    override suspend fun getProducts(): Answer<List<Product>, Unit> {
+        return try {
+            val response =
+                httpClient.get("https://api.json-generator.com/templates/Vc6TVI8VwZNT/data") {
+                    headers {
+                        append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                        val accessTokenHeader = AccessTokenProvider.getAccessTokenHeader()
+                        append(accessTokenHeader.first, accessTokenHeader.second)
+                    }
+                }
+            if (response.status.isSuccess()) {
+                handleSuccessfulProductsResponse(response)
+            } else {
+                Answer.Error(Unit)
+            }
+        } catch (t: Throwable) {
+            Answer.Error(Unit)
+        }
+    }
+
+    private suspend fun handleSuccessfulProductsResponse(httpResponse: HttpResponse): Answer<List<Product>, Unit> {
+        val responseBody = httpResponse.body<List<JsonProductResponseDTO>>()
+        return Answer.Success(mapProducts(responseBody))
+    }
+
+    private fun mapProducts(jsonProducts: List<JsonProductResponseDTO>): List<Product> {
+        return jsonProducts.map { jsonProduct ->
+            Product(
+                jsonProduct.id.toString(),
+                jsonProduct.name,
+                Money(jsonProduct.price, jsonProduct.currency),
+                jsonProduct.imageUrl
+            )
+        }
+    }
+}
+```
+
+### Step-by-Step HTTP Request
+
+<Steps>
+
+<Step title="Inject HttpClient">
+Receive the HttpClient through dependency injection:
+
+```kotlin
+class RealProductRepository(
+    private val httpClient: HttpClient
+) : ProductRepository
+```
+</Step>
+
+<Step title="Make the request">
+Use Ktor's extension functions for HTTP methods:
+
+```kotlin
+val response = httpClient.get("https://api.example.com/endpoint") {
+    headers {
+        append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        val accessTokenHeader = AccessTokenProvider.getAccessTokenHeader()
+        append(accessTokenHeader.first, accessTokenHeader.second)
+    }
+}
+```
+</Step>
+
+<Step title="Check response status">
+Verify the response was successful:
+
+```kotlin
+if (response.status.isSuccess()) {
+    // Handle success
+} else {
+    // Handle error
+}
+```
+</Step>
+
+<Step title="Deserialize response">
+Automatic deserialization using kotlinx.serialization:
+
+```kotlin
+val responseBody = httpResponse.body<List<JsonProductResponseDTO>>()
+```
+</Step>
+
+<Step title="Map to domain model">
+Convert DTOs to domain models:
+
+```kotlin
+val products = mapProducts(responseBody)
+return Answer.Success(products)
+```
+</Step>
+
+</Steps>
+
+### Error Handling Pattern
+
+```kotlin
+override suspend fun getData(): Answer<Data, Unit> {
+    return try {
+        val response = httpClient.get(url) {
+            // Configuration
+        }
+        if (response.status.isSuccess()) {
+            val body = response.body<DataDTO>()
+            Answer.Success(mapToDomain(body))
+        } else {
+            Answer.Error(Unit)
+        }
+    } catch (t: Throwable) {
+        Answer.Error(Unit)
+    }
+}
+```
+
+<Note>
+This pattern uses the `Answer` type from the foundations library to represent success or failure results.
+</Note>
+
+## Testing
+
+### Creating Test Clients
+
+The `createClient` function accepts a custom engine for testing:
+
+```kotlin
+val testEngine = MockEngine { request ->
+    respond(
+        content = """[{"id": 1, "name": "Test Product"}]""",
+        status = HttpStatusCode.OK,
+        headers = headersOf(HttpHeaders.ContentType, "application/json")
+    )
+}
+
+val testClient = RealHttpClientProvider.createClient(testEngine)
+```
+
+<Tip>
+Use Ktor's MockEngine in tests to avoid actual network calls and control response scenarios.
+</Tip>
+
+## Common HTTP Operations
+
+<CardGroup cols={2}>
+
+<Card title="GET Requests" icon="download">
+```kotlin
+httpClient.get("url") {
+    headers { /* ... */ }
+}
+```
+Retrieve data from the server.
+</Card>
+
+<Card title="POST Requests" icon="upload">
+```kotlin
+httpClient.post("url") {
+    contentType(ContentType.Application.Json)
+    setBody(data)
+}
+```
+Send data to the server.
+</Card>
+
+<Card title="PUT Requests" icon="pen">
+```kotlin
+httpClient.put("url") {
+    contentType(ContentType.Application.Json)
+    setBody(updatedData)
+}
+```
+Update existing resources.
+</Card>
+
+<Card title="DELETE Requests" icon="trash">
+```kotlin
+httpClient.delete("url") {
+    headers { /* ... */ }
+}
+```
+Remove resources from the server.
+</Card>
+
+</CardGroup>
+
+## Best Practices
+
+<Info>
+**Dependency Injection**: Always inject `HttpClient` rather than accessing `RealHttpClientProvider` directly for better testability.
+</Info>
+
+<Info>
+**Timeout Configuration**: The 3-second timeout is suitable for most API calls. Adjust based on your specific needs.
+</Info>
+
+<Info>
+**Error Handling**: Always wrap HTTP calls in try-catch blocks to handle network failures gracefully.
+</Info>
+
+<Warning>
+The HttpClient is configured as a singleton (lazy initialization). Avoid creating multiple instances unnecessarily.
+</Warning>
+
+## Configuration Customization
+
+For custom configurations, extend or wrap the provider:
+
+```kotlin
+object CustomHttpClientProvider : HttpClientProvider {
+    private val httpClient by lazy {
+        HttpClient(CIO.create()) {
+            install(ContentNegotiation) { /* custom config */ }
+            install(HttpTimeout) { 
+                requestTimeoutMillis = 5000L // Different timeout
+            }
+            install(Logging) { 
+                level = LogLevel.ALL
+            }
+        }
+    }
+
+    override fun getClient(): HttpClient = httpClient
+}
+```
+
+<Tip>
+Consider adding the Logging plugin during development to debug HTTP requests and responses.
+</Tip>

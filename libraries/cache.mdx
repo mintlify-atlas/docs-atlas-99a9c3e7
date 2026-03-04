@@ -1,0 +1,280 @@
+---
+title: Cache Library
+description: Persistent caching with reactive Flow support using kotlinx.serialization
+---
+
+The Cache library provides a type-safe abstraction for persistent data storage with built-in serialization and reactive Flow support. It enables seamless caching of domain models with automatic serialization using kotlinx.serialization.
+
+## Core Interfaces
+
+### CachedObject
+
+The basic caching interface for storing and retrieving single values.
+
+```kotlin
+interface CachedObject<T : Any> {
+    fun put(value: T)
+    fun get(): T
+}
+```
+
+**Key Features:**
+- Type-safe generic interface
+- Synchronous read/write operations
+- Automatic serialization/deserialization
+
+### FlowCachedObject
+
+Extends `CachedObject` with reactive Flow support for observing cached values.
+
+```kotlin
+interface FlowCachedObject<T : Any> : CachedObject<T> {
+    fun observe(): Flow<T>
+}
+```
+
+**Key Features:**
+- Extends CachedObject with reactive capabilities
+- Returns a Flow that emits updates when cached value changes
+- Perfect for reactive UI updates
+
+### CacheProvider
+
+Factory interface for creating cached objects with different capabilities.
+
+```kotlin
+interface CacheProvider {
+    fun <T : Any> getCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): CachedObject<T>
+
+    fun <T : Any> getFlowCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): FlowCachedObject<T>
+}
+```
+
+**Parameters:**
+- `fileName`: Unique identifier for the cache file
+- `serializer`: kotlinx.serialization serializer for type T
+- `defaultValue`: Default value returned when cache is empty
+
+## Implementations
+
+### RealCachedObject
+
+Production implementation using multiplatform-settings library.
+
+```kotlin
+class RealCachedObject<T : Any>(
+    private val fileName: String,
+    private val settings: Settings,
+    private val serializer: KSerializer<T>,
+    private val defaultValue: T
+) : CachedObject<T> {
+    override fun put(value: T) {
+        settings.encodeValue(serializer, fileName, value)
+    }
+
+    override fun get(): T {
+        return settings.decodeValue(serializer, fileName, defaultValue)
+    }
+}
+```
+
+<Note>
+RealCachedObject uses the [multiplatform-settings](https://github.com/russhwolf/multiplatform-settings) library for cross-platform persistent storage.
+</Note>
+
+### RealFlowCachedObject
+
+Implementation that adds reactive Flow support to any CachedObject.
+
+```kotlin
+class RealFlowCachedObject<T : Any>(
+    private val cachedObject: CachedObject<T>
+) : FlowCachedObject<T>, CachedObject<T> by cachedObject {
+
+    private val cacheFlow = MutableStateFlow(get())
+
+    override fun put(value: T) {
+        cachedObject.put(value)
+        cacheFlow.value = value
+    }
+
+    override fun observe(): Flow<T> {
+        return cacheFlow.asStateFlow()
+    }
+}
+```
+
+**Implementation Details:**
+- Delegates CachedObject operations to the wrapped instance
+- Maintains a MutableStateFlow synchronized with cached value
+- Emits new values immediately when put() is called
+
+## Usage Examples
+
+### Basic Caching in Repository
+
+Example from `RealCartRepository` showing FlowCachedObject usage:
+
+```kotlin
+internal class RealCartRepository(
+    private val cacheProvider: CacheProvider
+) : CartRepository {
+
+    private val flowCachedObject: FlowCachedObject<JsonCartCacheDto> by lazy {
+        cacheProvider.getFlowCachedObject(
+            fileName = "cart-cache",
+            serializer = JsonCartCacheDto.serializer(),
+            defaultValue = JsonCartCacheDto(emptyMap())
+        )
+    }
+
+    override fun updateCartItem(userId: String, cartItem: CartItem) {
+        val updatedCache = getUpdatedCacheForUser(userId) { userCart ->
+            // Modify cart logic...
+        }
+        flowCachedObject.put(updatedCache)
+    }
+
+    override fun observeCart(userId: String): Flow<Cart> {
+        return flowCachedObject.observe().map { cachedDto ->
+            mapToCart(userId, cachedDto)
+        }
+    }
+
+    override fun getCart(userId: String): Cart {
+        return mapToCart(userId, flowCachedObject.get())
+    }
+}
+```
+
+<Steps>
+
+<Step title="Define your cache model">
+Create a serializable data class for your cached data:
+
+```kotlin
+@Serializable
+data class JsonCartCacheDto(
+    val usersCart: Map<String, List<JsonCartItemCacheDto>>
+)
+```
+</Step>
+
+<Step title="Create a cached object">
+Use CacheProvider to create a cached object with the appropriate type:
+
+```kotlin
+val cachedObject = cacheProvider.getFlowCachedObject(
+    fileName = "cart-cache",
+    serializer = JsonCartCacheDto.serializer(),
+    defaultValue = JsonCartCacheDto(emptyMap())
+)
+```
+</Step>
+
+<Step title="Read and write data">
+Use put() to store and get() to retrieve:
+
+```kotlin
+// Write
+cachedObject.put(updatedData)
+
+// Read
+val currentData = cachedObject.get()
+
+// Observe (FlowCachedObject only)
+cachedObject.observe().collect { data ->
+    // React to changes
+}
+```
+</Step>
+
+</Steps>
+
+### Testing with TestCacheProvider
+
+The `cache-test` module provides testing utilities:
+
+```kotlin
+class TestCacheProvider(
+    private val expectedFileName: String,
+    private val expectedDefaultValue: Any
+) : CacheProvider {
+
+    lateinit var providedCachedObject: InMemoryCachedObject<*>
+
+    override fun <T : Any> getCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): CachedObject<T> {
+        return if (expectedFileName == fileName && expectedDefaultValue == defaultValue) {
+            InMemoryCachedObject(defaultValue).also {
+                providedCachedObject = it
+            }
+        } else {
+            throw IllegalStateException("getCachedObject not stubbed")
+        }
+    }
+
+    override fun <T : Any> getFlowCachedObject(
+        fileName: String,
+        serializer: KSerializer<T>,
+        defaultValue: T
+    ): FlowCachedObject<T> {
+        return RealFlowCachedObject(getCachedObject(fileName, serializer, defaultValue))
+    }
+}
+```
+
+<Tip>
+Use `InMemoryCachedObject` in tests to avoid persistent storage dependencies and verify cache interactions.
+</Tip>
+
+## Best Practices
+
+<CardGroup cols={2}>
+
+<Card title="Use FlowCachedObject for UI" icon="flow">
+When data needs to reactively update the UI, prefer FlowCachedObject over CachedObject for automatic updates.
+</Card>
+
+<Card title="Lazy Initialization" icon="clock">
+Initialize cached objects lazily to avoid unnecessary file I/O during object construction.
+</Card>
+
+<Card title="Type Safety" icon="shield">
+Leverage kotlinx.serialization to ensure type-safe serialization and avoid runtime errors.
+</Card>
+
+<Card title="Default Values" icon="file">
+Always provide meaningful default values to handle empty cache scenarios gracefully.
+</Card>
+
+</CardGroup>
+
+## Key Advantages
+
+<Info>
+**Cross-platform Support**: Works seamlessly across Android, iOS, and other Kotlin Multiplatform targets using multiplatform-settings.
+</Info>
+
+<Info>
+**Reactive by Design**: FlowCachedObject integrates perfectly with Kotlin Flow for reactive programming patterns.
+</Info>
+
+<Info>
+**Type-Safe**: Compile-time type safety through generics and kotlinx.serialization prevents runtime casting errors.
+</Info>
+
+<Warning>
+Cached data persists across app sessions. Ensure you handle schema migrations when changing cached data structures.
+</Warning>

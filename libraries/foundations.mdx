@@ -1,0 +1,454 @@
+---
+title: Foundations Library
+description: Core language utilities and functional programming constructs
+---
+
+The Foundations library provides essential utilities and functional programming primitives used throughout the Real Clean Architecture codebase. It offers type-safe error handling and result modeling.
+
+## Answer Type
+
+The `Answer` type is a sealed class that represents the result of an operation that can either succeed or fail. It's similar to Kotlin's `Result` but provides custom error types.
+
+### Definition
+
+```kotlin
+sealed class Answer<out T, out E> {
+    data class Success<out T>(
+        val data: T,
+    ) : Answer<T, Nothing>()
+
+    data class Error<out E>(
+        val reason: E,
+    ) : Answer<Nothing, E>()
+
+    fun <C> fold(
+        success: (T) -> C,
+        error: (E) -> C,
+    ): C =
+        when (this) {
+            is Success -> success(data)
+            is Error -> error(reason)
+        }
+}
+```
+
+### Type Parameters
+
+- **T**: The type of the success value
+- **E**: The type of the error reason
+
+### Variants
+
+<Accordion title="Answer.Success">
+Represents a successful operation result.
+
+```kotlin
+data class Success<out T>(
+    val data: T,
+) : Answer<T, Nothing>()
+```
+
+**Properties:**
+- `data`: The successful result value
+
+**Example:**
+```kotlin
+val result: Answer<List<Product>, Unit> = Answer.Success(products)
+```
+</Accordion>
+
+<Accordion title="Answer.Error">
+Represents a failed operation result.
+
+```kotlin
+data class Error<out E>(
+    val reason: E,
+) : Answer<Nothing, E>()
+```
+
+**Properties:**
+- `reason`: The error reason or error type
+
+**Example:**
+```kotlin
+val result: Answer<List<Product>, NetworkError> = Answer.Error(NetworkError.Timeout)
+```
+</Accordion>
+
+## The fold Method
+
+The `fold` method provides a functional way to handle both success and error cases:
+
+```kotlin
+fun <C> fold(
+    success: (T) -> C,
+    error: (E) -> C,
+): C
+```
+
+**Parameters:**
+- `success`: Function to transform the success value
+- `error`: Function to transform the error value
+
+**Returns:** The result of applying the appropriate function based on the Answer variant
+
+<Note>
+The fold method ensures exhaustive handling of both success and error cases at compile-time.
+</Note>
+
+## Usage Examples
+
+### Basic Usage in Repository
+
+Example from `RealProductRepository` showing Answer usage:
+
+```kotlin
+internal class RealProductRepository(
+    private val httpClient: HttpClient
+) : ProductRepository {
+    override suspend fun getProducts(): Answer<List<Product>, Unit> {
+        return try {
+            val response = httpClient.get("https://api.json-generator.com/templates/Vc6TVI8VwZNT/data") {
+                headers {
+                    append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                    val accessTokenHeader = AccessTokenProvider.getAccessTokenHeader()
+                    append(accessTokenHeader.first, accessTokenHeader.second)
+                }
+            }
+            if (response.status.isSuccess()) {
+                handleSuccessfulProductsResponse(response)
+            } else {
+                Answer.Error(Unit)
+            }
+        } catch (t: Throwable) {
+            Answer.Error(Unit)
+        }
+    }
+
+    private suspend fun handleSuccessfulProductsResponse(
+        httpResponse: HttpResponse
+    ): Answer<List<Product>, Unit> {
+        val responseBody = httpResponse.body<List<JsonProductResponseDTO>>()
+        return Answer.Success(mapProducts(responseBody))
+    }
+}
+```
+
+### Pattern Matching with when
+
+```kotlin
+fun handleProductResult(result: Answer<List<Product>, NetworkError>) {
+    when (result) {
+        is Answer.Success -> {
+            val products = result.data
+            displayProducts(products)
+        }
+        is Answer.Error -> {
+            val error = result.reason
+            showError(error.message)
+        }
+    }
+}
+```
+
+<Tip>
+Kotlin's smart cast automatically narrows the type within each branch, giving you direct access to `data` or `reason`.
+</Tip>
+
+### Using fold for Transformation
+
+```kotlin
+val message: String = result.fold(
+    success = { products -> "Loaded ${products.size} products" },
+    error = { error -> "Failed to load products: $error" }
+)
+println(message)
+```
+
+### Chaining Operations
+
+```kotlin
+suspend fun getProductById(id: String): Answer<Product, ProductError> {
+    return when (val result = repository.getProducts()) {
+        is Answer.Success -> {
+            val product = result.data.find { it.id == id }
+            if (product != null) {
+                Answer.Success(product)
+            } else {
+                Answer.Error(ProductError.NotFound)
+            }
+        }
+        is Answer.Error -> Answer.Error(ProductError.NetworkFailure)
+    }
+}
+```
+
+## Error Type Strategies
+
+### Unit Error Type
+
+Used when the specific error reason doesn't matter:
+
+```kotlin
+override suspend fun getProducts(): Answer<List<Product>, Unit> {
+    return try {
+        // ... fetch products
+        Answer.Success(products)
+    } catch (t: Throwable) {
+        Answer.Error(Unit)
+    }
+}
+```
+
+<Info>
+Using `Unit` as the error type is suitable when you only care about success/failure, not the specific error reason.
+</Info>
+
+### Custom Error Types
+
+Define sealed classes for specific error scenarios:
+
+```kotlin
+sealed class ProductError {
+    object NetworkFailure : ProductError()
+    object NotFound : ProductError()
+    data class InvalidData(val field: String) : ProductError()
+}
+
+override suspend fun getProduct(id: String): Answer<Product, ProductError> {
+    return try {
+        val response = httpClient.get("products/$id")
+        when {
+            response.status.isSuccess() -> {
+                val product = response.body<ProductDTO>()
+                Answer.Success(product.toDomain())
+            }
+            response.status.value == 404 -> Answer.Error(ProductError.NotFound)
+            else -> Answer.Error(ProductError.NetworkFailure)
+        }
+    } catch (t: Throwable) {
+        Answer.Error(ProductError.NetworkFailure)
+    }
+}
+```
+
+### Exception Error Types
+
+Wrap exceptions for detailed error information:
+
+```kotlin
+sealed class DataError {
+    data class Exception(val throwable: Throwable) : DataError()
+    object InvalidFormat : DataError()
+}
+
+suspend fun parseData(json: String): Answer<Data, DataError> {
+    return try {
+        val data = Json.decodeFromString<Data>(json)
+        Answer.Success(data)
+    } catch (e: SerializationException) {
+        Answer.Error(DataError.InvalidFormat)
+    } catch (e: Exception) {
+        Answer.Error(DataError.Exception(e))
+    }
+}
+```
+
+## Use Case Integration
+
+### Repository Layer
+
+Repositories return Answer to represent data fetching results:
+
+```kotlin
+interface ProductRepository {
+    suspend fun getProducts(): Answer<List<Product>, Unit>
+    suspend fun getProduct(id: String): Answer<Product, ProductError>
+}
+```
+
+### Use Case Layer
+
+Use cases can transform or combine Answer results:
+
+```kotlin
+class GetFeaturedProducts(
+    private val repository: ProductRepository
+) {
+    suspend operator fun invoke(): Answer<List<Product>, Unit> {
+        return when (val result = repository.getProducts()) {
+            is Answer.Success -> {
+                val featured = result.data.filter { it.isFeatured }
+                Answer.Success(featured)
+            }
+            is Answer.Error -> result
+        }
+    }
+}
+```
+
+### ViewModel Layer
+
+ViewModels consume Answer and update state accordingly:
+
+```kotlin
+class ProductViewModel(
+    private val getProducts: GetProducts,
+    private val stateDelegate: StateDelegate<ProductState>
+) : StateViewModel<ProductState> by stateDelegate, ViewModel() {
+
+    init {
+        loadProducts()
+    }
+
+    private fun loadProducts() {
+        viewModelScope.launch {
+            stateDelegate.updateState { it.copy(isLoading = true) }
+            
+            val result = getProducts()
+            result.fold(
+                success = { products ->
+                    stateDelegate.updateState {
+                        it.copy(
+                            products = products,
+                            isLoading = false,
+                            error = null
+                        )
+                    }
+                },
+                error = { _ ->
+                    stateDelegate.updateState {
+                        it.copy(
+                            isLoading = false,
+                            error = "Failed to load products"
+                        )
+                    }
+                }
+            )
+        }
+    }
+}
+```
+
+## Advantages Over Exceptions
+
+<CardGroup cols={2}>
+
+<Card title="Explicit Error Handling" icon="exclamation-triangle">
+Forces callers to handle errors explicitly, preventing forgotten error cases.
+</Card>
+
+<Card title="Type-Safe Errors" icon="shield">
+Error types are part of the function signature, making error cases discoverable.
+</Card>
+
+<Card title="No Hidden Control Flow" icon="route">
+No invisible exception throwing that can crash the app if unhandled.
+</Card>
+
+<Card title="Easier Testing" icon="vial">
+Error scenarios can be easily created and tested without throwing exceptions.
+</Card>
+
+</CardGroup>
+
+## Best Practices
+
+<Steps>
+
+<Step title="Use appropriate error types">
+Choose between Unit, custom sealed classes, or exception wrappers based on your needs:
+
+```kotlin
+// Simple: only care about success/failure
+Answer<Data, Unit>
+
+// Detailed: need to distinguish error types
+Answer<Data, DataError>
+
+// Rich: preserve exception information
+Answer<Data, Exception>
+```
+</Step>
+
+<Step title="Pattern match exhaustively">
+Always handle both Success and Error cases:
+
+```kotlin
+when (result) {
+    is Answer.Success -> { /* handle success */ }
+    is Answer.Error -> { /* handle error */ }
+}
+```
+</Step>
+
+<Step title="Use fold for transformations">
+Prefer fold when you need to transform both cases to the same type:
+
+```kotlin
+val uiState = result.fold(
+    success = { UiState.Success(it) },
+    error = { UiState.Error }
+)
+```
+</Step>
+
+<Step title="Keep error types simple">
+Start with simple error types (Unit) and add complexity only when needed:
+
+```kotlin
+// Start simple
+Answer<Data, Unit>
+
+// Add complexity when needed
+Answer<Data, NetworkError>
+```
+</Step>
+
+</Steps>
+
+<Warning>
+Avoid mixing Answer with exceptions. If a function returns Answer, it should catch all exceptions internally and convert them to Answer.Error.
+</Warning>
+
+## Extension Functions
+
+Common extension functions you might add:
+
+```kotlin
+// Map the success value
+fun <T, E, R> Answer<T, E>.map(transform: (T) -> R): Answer<R, E> {
+    return when (this) {
+        is Answer.Success -> Answer.Success(transform(data))
+        is Answer.Error -> this
+    }
+}
+
+// Map the error value
+fun <T, E, R> Answer<T, E>.mapError(transform: (E) -> R): Answer<T, R> {
+    return when (this) {
+        is Answer.Success -> this
+        is Answer.Error -> Answer.Error(transform(reason))
+    }
+}
+
+// Get value or default
+fun <T, E> Answer<T, E>.getOrDefault(default: T): T {
+    return when (this) {
+        is Answer.Success -> data
+        is Answer.Error -> default
+    }
+}
+
+// Get value or null
+fun <T, E> Answer<T, E>.getOrNull(): T? {
+    return when (this) {
+        is Answer.Success -> data
+        is Answer.Error -> null
+    }
+}
+```
+
+<Tip>
+Create these extension functions in a separate file for reusability across your project.
+</Tip>
