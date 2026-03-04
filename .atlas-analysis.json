@@ -1,0 +1,95 @@
+{
+  "projectType": "general",
+  "projectName": "Real Clean Architecture in Android",
+  "projectDescription": "A sample Android application demonstrating Clean Architecture implementation with SOLID principles using minimal third-party dependencies.",
+  "theme": "palm",
+  "primaryColor": "#3DDC84",
+  "lightColor": "#4ADE80",
+  "darkColor": "#16A34A",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "introduction",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "architecture/overview",
+          "architecture/clean-architecture",
+          "architecture/solid-principles",
+          "architecture/modularization"
+        ]
+      },
+      {
+        "group": "Modules",
+        "pages": [
+          "modules/library-modules",
+          "modules/component-modules",
+          "modules/ui-modules",
+          "modules/app-module"
+        ]
+      },
+      {
+        "group": "Components",
+        "pages": [
+          "components/cart-component",
+          "components/product-component",
+          "components/user-component",
+          "components/wishlist-component",
+          "components/money-component"
+        ]
+      },
+      {
+        "group": "Libraries",
+        "pages": [
+          "libraries/cache",
+          "libraries/httpclient",
+          "libraries/viewmodel",
+          "libraries/foundations"
+        ]
+      },
+      {
+        "group": "Testing",
+        "pages": [
+          "testing/overview",
+          "testing/unit-testing",
+          "testing/test-utilities"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Clean Architecture implementation with clear separation of concerns",
+    "SOLID principles applied throughout the codebase",
+    "Package by Component modularization strategy",
+    "Framework-independent domain layer",
+    "Kotlin Multiplatform component modules",
+    "Minimal third-party dependencies",
+    "Comprehensive unit testing",
+    "Jetpack Compose UI implementation"
+  ],
+  "publicApiSurface": [
+    "Cart: domain/model/Cart.kt",
+    "Product: domain/model/Product.kt",
+    "User: domain/model/User.kt",
+    "Wishlist: domain/model/Wishlist.kt",
+    "Money: domain/model/Money.kt",
+    "CartRepository: domain/repository/CartRepository.kt",
+    "ProductRepository: domain/repository/ProductRepository.kt",
+    "UserRepository: domain/repository/UserRepository.kt",
+    "WishlistRepository: domain/repository/WishlistRepository.kt",
+    "AddCartItemUseCase: domain/usecase/AddCartItemUseCase.kt",
+    "ObserveUserCartUseCase: domain/usecase/ObserveUserCartUseCase.kt",
+    "GetProducts: domain/usecase/GetProducts.kt",
+    "Login: domain/usecase/Login.kt",
+    "IsUserLoggedIn: domain/usecase/IsUserLoggedIn.kt",
+    "AddWishlistItem: domain/usecase/AddWishlistItem.kt",
+    "RemoveWishlistItem: domain/usecase/RemoveWishlistItem.kt",
+    "CacheProvider: cache/CacheProvider.kt",
+    "HttpClientProvider: httpclient/HttpClientProvider.kt"
+  ]
+}
